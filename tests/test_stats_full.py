@@ -1483,6 +1483,76 @@ request_shape_repeated_context_canaries:
         self.assertEqual({row["value"]: row["count"] for row in result["policy_ids"]}, {"managed-route-24h": 1})
         self.assertTrue(result["recent"][0]["applied"])
 
+    def test_managed_recommendations_expose_routing_conversion_funnel_by_hold_reason(self):
+        from tokenclaw.store import stable_json, utc_now
+
+        def log(call_id: str, managed: dict[str, Any], *, routed: str = "claude-sonnet-4-6") -> None:
+            server.store.log_call(
+                id=call_id,
+                created_at=utc_now(),
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model=routed,
+                stream=0,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=10,
+                input_tokens_est=100,
+                output_tokens_est=10,
+                cost_est_usd=0.001,
+                cost_baseline_usd=0.003,
+                routing_json=stable_json({"reason": "test"}),
+                managed_routing_json=stable_json(managed),
+                provider="anthropic",
+                category="tool-result",
+            )
+
+        # Applied: server recommended and the local proxy routed.
+        log("applied-1", {
+            "status": "received", "routing_status": "recommended",
+            "target_model": "claude-haiku-4-5-20251001",
+            "applied": True, "changed_model": True, "local_action_taken": "route_to",
+        }, routed="claude-haiku-4-5-20251001")
+        # Held twice on the trained-predictor evidence gate.
+        for i in range(2):
+            log(f"evidence-{i}", {
+                "status": "received", "routing_status": "recommended",
+                "would_route_model": "claude-haiku-4-5-20251001",
+                "applied": False, "changed_model": False,
+                "apply_reason": "routing-predictor-evidence-required",
+                "local_action_taken": "noop",
+            })
+        # Held on local canary holdout.
+        log("canary-holdout-1", {
+            "status": "received", "routing_status": "recommended",
+            "would_route_model": "claude-haiku-4-5-20251001",
+            "applied": False, "changed_model": False,
+            "apply_reason": "local-canary-holdout", "local_action_taken": "canary_holdout",
+        })
+        # Server returned a decision but recommended no route.
+        log("no-route-1", {
+            "status": "received", "routing_status": "noop", "applied": False,
+        })
+        # No usable server decision at all.
+        log("skipped-1", {"status": "skipped", "reason": "disabled", "applied": False})
+
+        result = asyncio.run(stats_views.stats_managed_recommendations(server.store, limit=50))
+        conversion = result["routing_conversion"]
+
+        self.assertEqual(conversion["decisions_considered"], 6)
+        self.assertEqual(conversion["route_recommended"], 4)
+        self.assertEqual(conversion["applied"], 1)
+        self.assertEqual(conversion["held"], 3)
+        self.assertEqual(conversion["applied_rate"], round(1 / 4, 6))
+        self.assertEqual(conversion["top_hold_reason"], "routing-predictor-evidence-required")
+        hold = {row["value"]: row["count"] for row in conversion["hold_reason_breakdown"]}
+        self.assertEqual(hold, {"routing-predictor-evidence-required": 2, "local-canary-holdout": 1})
+        stages = {row["value"]: row["count"] for row in conversion["stage_breakdown"]}
+        self.assertEqual(stages["route_recommended_applied"], 1)
+        self.assertEqual(stages["route_recommended_held"], 3)
+        self.assertEqual(stages["no_route_recommended"], 1)
+        self.assertEqual(stages["no_decision"], 1)
+
     def test_lightweight_and_weekly_stats_expose_compact_managed_feed_summary(self):
         now = datetime.now(timezone.utc)
 

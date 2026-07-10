@@ -94,6 +94,7 @@ def dashboard_html() -> str:
       <div class="card"><div class="label">Savings</div><div class="value money" id="week-savings">-</div><div class="hint">local summary endpoint</div></div>
       <div class="card"><div class="label">Tokens</div><div class="value" id="week-tokens">-</div><div class="hint" id="week-errors">- errors</div></div>
       <div class="card"><div class="label">Managed feed</div><div class="value" id="week-managed-state">-</div><div class="hint" id="week-managed-detail">-</div></div>
+      <div class="card"><div class="label">Routing conversion</div><div class="value" id="week-routing-conversion">-</div><div class="hint" id="week-routing-conversion-detail">-</div></div>
     </div>
     <div class="section">
       <h2>Managed Backing</h2>
@@ -174,6 +175,27 @@ function managedCompactText(summary){
   const backing=summary.backing_counts||{};
   const managed=Number(backing['managed-recommended']||0)+Number(backing['managed-enforced']||0);
   return `${num(calls.succeeded)} succeeded · ${num(calls.skipped)} skipped · ${num(managed)} managed-backed`;
+}
+function renderRoutingConversion(conv){
+  conv=conv||{};
+  const recommended=Number(conv.route_recommended||0);
+  const applied=Number(conv.applied||0);
+  const value=document.getElementById('week-routing-conversion');
+  const detail=document.getElementById('week-routing-conversion-detail');
+  if(!value||!detail)return;
+  value.textContent=`${num(applied)}/${num(recommended)} applied`;
+  if(!recommended){
+    value.className='value muted';
+    detail.textContent='no routes recommended';
+    return;
+  }
+  const held=Number(conv.held||0);
+  const rate=conv.applied_rate==null?null:Math.round(Number(conv.applied_rate)*100);
+  // A recommended-but-never-applied funnel is the exact bottleneck this surfaces.
+  value.className='value '+(applied?'money':'err');
+  detail.textContent=held
+    ? `${rate==null?'-':rate+'%'} applied · top hold: ${esc(conv.top_hold_reason||'unknown')}`
+    : 'all recommended routes applied';
 }
 function queueStatusClass(status){
   if(status==='sent')return'ok';
@@ -322,6 +344,7 @@ function renderWeekly(data){
   text('week-managed-detail',managedCompactText(managedWeek));
   document.getElementById('week-managed-state').className='value '+(managedState.server_calls_enabled?'money':'muted');
   document.getElementById('week-managed-tbody').innerHTML=managedSummaryRow('Last 7 days',managedState,managedWeek);
+  renderRoutingConversion(managedWeek.routing_conversion||{});
   const rows=(data.days||[]).map(row=>`<tr>
     <td>${row.day}</td>
     <td>${num(row.total_units)}</td>

@@ -169,6 +169,64 @@ def _managed_attempt_status(managed: dict[str, Any]) -> str:
         return "attempted"
     return "skipped"
 
+
+# Managed routing conversion funnel. The server's decision status (received/skipped/error)
+# does not answer the operator's real question: of the calls where the managed server
+# actually recommended a route, how many did the local proxy apply, and where did the rest
+# go? A recommended route can still be held locally (predictor-evidence gate, confidence
+# floor, canary holdout, thinking guard, client blocklist) or deliberately shadowed.
+# Bucketing the held routes by their local apply_reason is what distinguishes "server
+# isn't recommending" from "server recommends but we hold" — otherwise invisible in the
+# aggregate, and exactly the signal that would have surfaced a fully-held pipeline.
+_MANAGED_ROUTING_CONVERSION_STAGES = (
+    "route_recommended_applied",
+    "route_recommended_held",
+    "no_route_recommended",
+    "no_decision",
+    "server_error",
+)
+
+
+def _managed_route_was_recommended(managed: dict[str, Any]) -> bool:
+    if str(managed.get("routing_status") or "").strip() == "recommended":
+        return True
+    if managed.get("route_to_present") or managed.get("explicit_routing_action"):
+        return True
+    if managed.get("would_route_model") or managed.get("changed_model"):
+        return True
+    target = str(managed.get("target_model") or "").strip()
+    current = str(
+        managed.get("local_model_before_recommendation")
+        or managed.get("requested_model")
+        or ""
+    ).strip()
+    return bool(target and current and target != current)
+
+
+def _managed_routing_conversion_classify(managed: dict[str, Any]) -> tuple[str, str | None]:
+    """Classify one persisted managed_recommendation into the routing conversion funnel.
+
+    Returns (stage, hold_reason); hold_reason is only set for route_recommended_held.
+    """
+    status = str(managed.get("status") or "").strip()
+    if status in {"error", "invalid"}:
+        return "server_error", None
+    if status not in _MANAGED_SUCCESS_STATUSES and not managed.get("applied"):
+        return "no_decision", None
+    if not _managed_route_was_recommended(managed):
+        return "no_route_recommended", None
+    if managed.get("applied") and managed.get("changed_model"):
+        return "route_recommended_applied", None
+    hold_reason = public_label(
+        managed.get("apply_reason")
+        or managed.get("local_action_taken")
+        or managed.get("reason")
+        or "unknown",
+        "unknown",
+    )
+    return "route_recommended_held", hold_reason
+
+
 def _managed_feed_decision_summary(
     conn: Any,
     *,
@@ -203,6 +261,8 @@ def _managed_feed_decision_summary(
         "skipped": 0,
         "failed": 0,
     }
+    routing_conversion_counts: dict[str, int] = {stage: 0 for stage in _MANAGED_ROUTING_CONVERSION_STAGES}
+    routing_conversion_hold_reasons: dict[str, int] = {}
     by_day: dict[str, dict[str, Any]] = {}
 
     def empty_day() -> dict[str, Any]:
@@ -216,6 +276,11 @@ def _managed_feed_decision_summary(
         raw_managed = row["managed_routing_json"] if hasattr(row, "keys") else row[3 if day_field else 3]
         routing = _json_obj(raw_routing)
         managed = _json_obj(raw_managed) or _json_obj(routing.get("managed_recommendation"))
+        if isinstance(managed, dict) and managed:
+            conversion_stage, conversion_hold_reason = _managed_routing_conversion_classify(managed)
+            routing_conversion_counts[conversion_stage] = routing_conversion_counts.get(conversion_stage, 0) + 1
+            if conversion_hold_reason is not None:
+                _increment_count(routing_conversion_hold_reasons, conversion_hold_reason)
         source = _managed_decision_source(routing, managed)
         backing_counts[source] = backing_counts.get(source, 0) + 1
         attempt = _managed_attempt_status(managed)
@@ -233,12 +298,31 @@ def _managed_feed_decision_summary(
                 if attempt != "attempted":
                     bucket["policy_decision_calls"]["attempted"] = bucket["policy_decision_calls"].get("attempted", 0) + 1
 
+    conversion_applied = routing_conversion_counts.get("route_recommended_applied", 0)
+    conversion_held = routing_conversion_counts.get("route_recommended_held", 0)
+    conversion_recommended = conversion_applied + conversion_held
+    conversion_top_hold = (
+        max(routing_conversion_hold_reasons.items(), key=lambda item: item[1])[0]
+        if routing_conversion_hold_reasons
+        else None
+    )
+
     return {
         "schema": "tokenclaw.managed_feed_decision_summary.v1",
         "window_start": since,
         "total_calls": len(rows),
         "policy_decision_calls": attempts,
         "backing_counts": backing_counts,
+        "routing_conversion": {
+            "schema": "tokenclaw.managed_routing_conversion.v1",
+            "route_recommended": conversion_recommended,
+            "applied": conversion_applied,
+            "held": conversion_held,
+            "applied_rate": round(conversion_applied / conversion_recommended, 6) if conversion_recommended else None,
+            "top_hold_reason": conversion_top_hold,
+            "stage_breakdown": _managed_breakdown(routing_conversion_counts),
+            "hold_reason_breakdown": _managed_breakdown(routing_conversion_hold_reasons),
+        },
         "by_day": by_day,
         "privacy": _metadata_only_privacy(),
     }
@@ -2365,6 +2449,8 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
 
     status_counts: dict[str, int] = {}
     reason_counts: dict[str, int] = {}
+    routing_conversion_counts: dict[str, int] = {stage: 0 for stage in _MANAGED_ROUTING_CONVERSION_STAGES}
+    routing_conversion_hold_reasons: dict[str, int] = {}
     fallback_counts: dict[str, int] = {}
     feedback_status_counts: dict[str, int] = {}
     feedback_reason_counts: dict[str, int] = {}
@@ -2433,6 +2519,10 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
             continue
 
         metadata_rows += 1
+        conversion_stage, conversion_hold_reason = _managed_routing_conversion_classify(managed)
+        routing_conversion_counts[conversion_stage] = routing_conversion_counts.get(conversion_stage, 0) + 1
+        if conversion_hold_reason is not None:
+            _increment_count(routing_conversion_hold_reasons, conversion_hold_reason)
         if is_recent_24h:
             requests_24h += 1
         status = str(managed.get("status") or "missing")
@@ -2554,6 +2644,27 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
             }
             break
 
+    applied_total = routing_conversion_counts.get("route_recommended_applied", 0)
+    held_total = routing_conversion_counts.get("route_recommended_held", 0)
+    recommended_total = applied_total + held_total
+    top_hold_reason = (
+        max(routing_conversion_hold_reasons.items(), key=lambda item: item[1])[0]
+        if routing_conversion_hold_reasons
+        else None
+    )
+    routing_conversion = {
+        "schema": "tokenclaw.managed_routing_conversion.v1",
+        "decisions_considered": metadata_rows,
+        "route_recommended": recommended_total,
+        "applied": applied_total,
+        "held": held_total,
+        "applied_rate": round(applied_total / recommended_total, 6) if recommended_total else None,
+        "top_hold_reason": top_hold_reason,
+        "stage_breakdown": _managed_breakdown(routing_conversion_counts),
+        "hold_reason_breakdown": _managed_breakdown(routing_conversion_hold_reasons),
+        "basis": "local apply_reason on stored managed_recommendation metadata",
+    }
+
     summary_payload = {
         "window_calls": len(rows),
         "metadata_rows": metadata_rows,
@@ -2634,6 +2745,7 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
         ),
         "status_breakdown": _managed_breakdown(status_counts),
         "reason_breakdown": _managed_breakdown(reason_counts),
+        "routing_conversion": routing_conversion,
         "fallback_breakdown": _managed_breakdown(fallback_counts),
         "policy_ids": _managed_breakdown(policy_counts),
         "feedback_status_breakdown": _managed_breakdown(feedback_status_counts),
