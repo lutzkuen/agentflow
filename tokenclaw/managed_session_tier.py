@@ -32,8 +32,17 @@ from tokenclaw.router import HAIKU_DEFAULT, OPUS_DEFAULT, SONNET_DEFAULT
 
 
 SESSION_TIER_PATH = "/v1/session-tier"
-SESSION_TIER_REQUEST_SCHEMA = "tokenclaw.session_tier_request.v1"
-SESSION_TIER_DECISION_SCHEMA = "tokenclaw.session_tier_decision.v1"
+# Wire schemas the managed server (tokenclaw_server) enforces. The server's
+# SessionTier request model is strict (extra="forbid") and still uses the
+# agentflow.* wire vocabulary, so the request literal must match it exactly.
+# Decisions are dual-accepted (agentflow.* is emitted today; tokenclaw.* is
+# tolerated) to mirror the migration pattern used for policy-decision responses.
+SESSION_TIER_REQUEST_SCHEMA = "agentflow.session_tier_request.v1"
+SESSION_TIER_DECISION_SCHEMA = "agentflow.session_tier_decision.v1"
+SESSION_TIER_DECISION_SCHEMAS = (
+    "agentflow.session_tier_decision.v1",
+    "tokenclaw.session_tier_decision.v1",
+)
 SESSION_TIER_ENABLED_ENV = "TOKENCLAW_SESSION_TIER_ENABLED"
 SESSION_TIER_CANARY_SALT_ENV = "TOKENCLAW_SESSION_TIER_CANARY_SALT"
 
@@ -229,22 +238,12 @@ def _session_tier_payload(unit: dict[str, Any], *, tool_count: int) -> dict[str,
         "requested_model": unit.get("requested_model"),
         "category": input_features.get("category") or tool_features.get("category"),
         "workflow_phase": input_features.get("workflow_phase") or tool_features.get("workflow_phase"),
-        "phase": input_features.get("workflow_phase") or tool_features.get("workflow_phase"),
         "text_chars": input_features.get("text_chars"),
         "input_tokens": input_tokens,
-        "input_tokens_est": input_tokens,
         "has_tools": bool(tool_features.get("has_tools")),
         "tool_count": max(0, int(tool_count or 0)),
         "grouping_identifiers": {
             "session_id_hash": grouping.get("session_id_hash"),
-        },
-        "privacy_summary": {
-            "metadata_only": True,
-            "raw_body_storage": False,
-            "raw_payload_included": False,
-            "provider_bodies_included": False,
-            "raw_prompts_included": False,
-            "session_ids_included": False,
         },
     }
     return {
@@ -257,7 +256,7 @@ def _session_tier_payload(unit: dict[str, Any], *, tool_count: int) -> dict[str,
 def _normalize_decision(body: Any) -> tuple[dict[str, Any] | None, str | None]:
     if not isinstance(body, dict):
         return None, "decision-not-object"
-    if body.get("schema") != SESSION_TIER_DECISION_SCHEMA:
+    if body.get("schema") not in SESSION_TIER_DECISION_SCHEMAS:
         return None, "unsupported-schema"
     if body.get("feature_only") is not True:
         return None, "feature-only-required"
