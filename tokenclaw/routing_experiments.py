@@ -2302,16 +2302,21 @@ def routing_experiment_feedback_features(
     shadow_cost_est_usd: float | None,
     shadow_routed_cost_est_usd: float | None = None,
     error: str | None = None,
+    shadow_http_error_detail: str | None = None,
 ) -> dict[str, Any]:
     category = str(routing_meta.get("category") or experiment_meta.get("category") or "unknown")
     requested_model = str(experiment_meta.get("requested_model") or routing_meta.get("requested_model") or "")
     routed_model = str(experiment_meta.get("routed_model") or routing_meta.get("routed_model") or "")
     shadow_preflight = experiment_meta.get("shadow_request_preflight") if isinstance(experiment_meta, dict) else None
-    shadow_http_error_detail = (
-        experiment_meta.get("shadow_http_error_detail")
-        if isinstance(experiment_meta.get("shadow_http_error_detail"), dict)
-        else None
-    )
+    # _shadow_http_error_detail() returns the truncated, sanitized upstream error
+    # *string* (e.g. an Anthropic invalid_request_error message), so accept a str.
+    # The prior isinstance(..., dict) check silently dropped every message, and the
+    # explicit param avoids the call-site ordering trap where experiment_meta only
+    # gains this key after feedback features are built. Prefer the param; fall back
+    # to experiment_meta (str, or a legacy dict) for backward compatibility.
+    if not (isinstance(shadow_http_error_detail, str) and shadow_http_error_detail):
+        meta_detail = experiment_meta.get("shadow_http_error_detail")
+        shadow_http_error_detail = meta_detail if isinstance(meta_detail, (str, dict)) and meta_detail else None
     unsupported_shape_reason = None
     if isinstance(shadow_preflight, dict) and shadow_preflight.get("status") == "unsupported":
         unsupported_shape_reason = _public_label(shadow_preflight.get("reason"), fallback="unsupported-shape")

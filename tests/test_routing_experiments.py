@@ -944,6 +944,50 @@ eligibility_overrides:
         self.assertEqual(result["reason_codes"], ["passed"])
         self.assertTrue(result["privacy"]["metadata_only"])
 
+    def test_shadow_http_error_detail_string_is_preserved(self):
+        # Regression: _shadow_http_error_detail() returns a truncated *string* (the
+        # Anthropic invalid_request_error message). The feedback builder previously
+        # only kept it when isinstance(..., dict), so every 400 message was dropped
+        # and the shadow error rate was undiagnosable. The explicit param must survive.
+        comparison = {
+            "primary_output_chars": 0,
+            "shadow_output_chars": 0,
+            "primary_output_sha256": "p",
+            "shadow_output_sha256": "s",
+            "output_similarity": 0.0,
+            "passed_threshold": False,
+        }
+        detail = "max_tokens: 64000 > 32000, the maximum allowed for non-streaming requests"
+
+        def _call(**overrides):
+            kwargs = dict(
+                experiment_id="exp-err",
+                experiment_meta={"sampled": True, "requested_model": "claude-opus-4-8", "routed_model": "claude-sonnet-5"},
+                routing_meta={"category": "tool-result"},
+                comparison=comparison,
+                primary_model="claude-opus-4-8",
+                shadow_model="claude-sonnet-5",
+                primary_status_code=200,
+                shadow_status_code=400,
+                primary_latency_ms=50,
+                shadow_latency_ms=10,
+                primary_cost_est_usd=0.001,
+                shadow_cost_est_usd=0.0,
+                error="shadow-http-400:invalid_request_error",
+            )
+            kwargs.update(overrides)
+            return experiments.routing_experiment_feedback_features(**kwargs)
+
+        # Explicit param is preserved.
+        self.assertEqual(_call(shadow_http_error_detail=detail)["shadow_http_error_detail"], detail)
+        # Backward-compat: falls back to a string carried on experiment_meta.
+        meta_result = _call(
+            experiment_meta={"sampled": True, "shadow_http_error_detail": detail},
+        )
+        self.assertEqual(meta_result["shadow_http_error_detail"], detail)
+        # Absent detail stays None (not an empty artifact).
+        self.assertIsNone(_call()["shadow_http_error_detail"])
+
     def test_outcome_event_uses_metadata_only_aggregate_fields(self):
         feedback = experiments.routing_experiment_feedback_features(
             experiment_id="local-exp-secret",

@@ -1370,6 +1370,7 @@ async def _run_anthropic_routing_experiment(
         shadow_cost_est_usd=shadow_cost,
         shadow_routed_cost_est_usd=shadow_routed_cost,
         error=error,
+        shadow_http_error_detail=shadow_http_error_detail,
     )
     experiment_meta.update(
         {
