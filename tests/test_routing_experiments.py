@@ -894,6 +894,75 @@ eligibility_overrides:
         self.assertIn(("openai", "openai_responses", "gpt-5.4", "gpt-5.4-mini"), surfaces)
         self.assertIn(("openai", "codex_turn", "gpt-5-codex", "gpt-5-mini"), surfaces)
 
+    def test_compare_records_functional_equivalence_facts(self):
+        # Same tool, textually different args: the strict exact-arg Jaccard scores 0
+        # (and stays the gating metric), while the recorded-only functional facts
+        # capture that both models reached for the same tool with similar arguments.
+        primary = {"content": [
+            {"type": "tool_use", "name": "Read", "input": {"file_path": "/repo/src/router.py", "limit": 40}},
+        ]}
+        shadow = {"content": [
+            {"type": "tool_use", "name": "Read", "input": {"file_path": "/repo/src/router.py", "limit": 60}},
+        ]}
+        result = experiments.compare_response_outputs(primary, shadow)
+        self.assertEqual(result["tool_call_similarity"], 0.0)
+        self.assertFalse(result["passed_threshold"])
+        self.assertEqual(result["tool_name_similarity"], 1.0)
+        self.assertGreater(result["matched_arg_similarity"], 0.5)
+        self.assertGreaterEqual(result["functional_similarity"], 0.7)
+        self.assertTrue(result["relaxed_passed"])
+
+        # Different tools entirely: the functional metric must NOT rescue this.
+        divergent = {"content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": "rm -rf build"}},
+        ]}
+        result = experiments.compare_response_outputs(primary, divergent)
+        self.assertEqual(result["tool_name_similarity"], 0.0)
+        self.assertIsNone(result["matched_arg_similarity"])
+        self.assertFalse(result["relaxed_passed"])
+
+        # Prose-only turns: functional similarity is the raw text embedding cosine.
+        prose_a = {"content": [{"type": "text", "text": "The deploy failed because the token expired."}]}
+        prose_b = {"content": [{"type": "text", "text": "Deployment failed: the token had expired."}]}
+        result = experiments.compare_response_outputs(prose_a, prose_b)
+        self.assertIsNone(result["tool_name_similarity"])
+        self.assertEqual(result["functional_similarity"], result["prose_similarity"])
+
+    def test_feedback_and_event_carry_difficulty_labels_and_functional_facts(self):
+        comparison = experiments.compare_response_outputs(
+            {"content": [{"type": "tool_use", "name": "Read", "input": {"file_path": "/a"}}]},
+            {"content": [{"type": "tool_use", "name": "Read", "input": {"file_path": "/b"}}]},
+        )
+        feedback = experiments.routing_experiment_feedback_features(
+            experiment_id="exp-risk",
+            experiment_meta={"sampled": True, "requested_model": "claude-opus-4-8", "routed_model": "claude-sonnet-5"},
+            routing_meta={
+                "category": "tool-result",
+                "workflow_phase": "thinking",
+                "prompt_difficulty_features": {"downgrade_risk": "safe", "task_intent": "edit/rewrite"},
+            },
+            comparison=comparison,
+            primary_model="claude-opus-4-8",
+            shadow_model="claude-sonnet-5",
+            primary_status_code=200,
+            shadow_status_code=200,
+            primary_latency_ms=50,
+            shadow_latency_ms=60,
+            primary_cost_est_usd=0.01,
+            shadow_cost_est_usd=0.002,
+        )
+        self.assertEqual(feedback["downgrade_risk"], "safe")
+        self.assertEqual(feedback["task_intent"], "edit/rewrite")
+        self.assertEqual(feedback["tool_name_similarity"], 1.0)
+        self.assertIn("functional_similarity", feedback)
+
+        event = experiments.routing_experiment_outcome_event(feedback)
+        self.assertEqual(event["candidate"]["downgrade_risk"], "safe")
+        self.assertEqual(event["candidate"]["task_intent"], "edit/rewrite")
+        self.assertIn("functional_similarity", event["outcome"])
+        self.assertIn("relaxed_passed", event["outcome"])
+        assert_managed_egress_safe(event)
+
     def test_feedback_features_are_metadata_only(self):
         comparison = {
             "primary_output_chars": 17,

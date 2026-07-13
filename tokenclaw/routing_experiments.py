@@ -57,6 +57,10 @@ def _public_label(value: Any, *, fallback: str = "unknown") -> str:
     return text
 
 
+def _nested_or_empty(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
 def _as_bool(value: Any, default: bool) -> bool:
     if value is None:
         return default
@@ -2189,6 +2193,63 @@ def _tool_call_set_similarity(primary_calls: list[str], shadow_calls: list[str])
     return len(primary_set & shadow_set) / len(union)
 
 
+# Recorded-only candidate bar for the relaxed functional-equivalence metric. The
+# strict exact-arg Jaccard at ROUTING_EXPERIMENT_SIMILARITY_THRESHOLD stays the
+# gating metric; relaxed_passed accrues alongside it so the promotion decision to
+# adopt (or reject) the relaxed metric per shape can be made from evidence.
+RELAXED_FUNCTIONAL_SIMILARITY_THRESHOLD = 0.70
+
+
+def _tool_call_parts(calls: list[str]) -> list[tuple[str, str]]:
+    """Split canonical "tool_use:NAME:args-json" strings into (name, args_json)."""
+    parts: list[tuple[str, str]] = []
+    for call in calls:
+        body = call[len("tool_use:"):] if call.startswith("tool_use:") else call
+        name, _, args_json = body.partition(":")
+        parts.append((name, args_json))
+    return parts
+
+
+def _tool_name_similarity(primary_calls: list[str], shadow_calls: list[str]) -> float | None:
+    """Jaccard agreement over tool NAMES only — did both models reach for the same tools?"""
+    primary_names = {name for name, _ in _tool_call_parts(primary_calls)}
+    shadow_names = {name for name, _ in _tool_call_parts(shadow_calls)}
+    union = primary_names | shadow_names
+    if not union:
+        return None
+    return len(primary_names & shadow_names) / len(union)
+
+
+def _matched_name_arg_similarity(primary_calls: list[str], shadow_calls: list[str]) -> float | None:
+    """Mean argument similarity across greedily best-paired same-name tool calls.
+
+    Distinguishes "same tool, textually different arguments" (often a functionally
+    equivalent action) from "different tool entirely". Computed locally on the
+    canonical arg JSON via the same bag-of-words embedding used elsewhere; only the
+    float leaves the proxy.
+    """
+    primary_parts = _tool_call_parts(primary_calls)
+    shadow_parts = [(name, args, build_embedding(args)) for name, args in _tool_call_parts(shadow_calls)]
+    scores: list[float] = []
+    remaining = list(shadow_parts)
+    for name, args in primary_parts:
+        candidates = [(idx, entry) for idx, entry in enumerate(remaining) if entry[0] == name]
+        if not candidates:
+            continue
+        embedding = build_embedding(args)
+        best_idx, best_score = -1, -1.0
+        for idx, (_, shadow_args, shadow_embedding) in candidates:
+            score = 1.0 if args == shadow_args else cosine_similarity(embedding, shadow_embedding)
+            if score > best_score:
+                best_idx, best_score = idx, score
+        if best_idx >= 0:
+            scores.append(max(0.0, best_score))
+            remaining.pop(best_idx)
+    if not scores:
+        return None
+    return sum(scores) / len(scores)
+
+
 def compare_response_outputs(primary_response: dict[str, Any] | None, shadow_response: dict[str, Any] | None) -> dict[str, Any]:
     primary_text = response_output_text(primary_response or {})
     shadow_text = response_output_text(shadow_response or {})
@@ -2213,6 +2274,28 @@ def compare_response_outputs(primary_response: dict[str, Any] | None, shadow_res
         similarity = tool_call_similarity if tool_call_similarity is not None else text_similarity
     else:
         similarity = text_similarity
+
+    # Granular equivalence facts, recorded alongside the strict metric so the
+    # relaxed functional metric can be validated (or rejected) from evidence
+    # before anything gates on it. Tool turns: same tool names + similar args is
+    # a candidate definition of "equivalent action" that exact-arg Jaccard scores
+    # as 0. Prose turns: raw text embedding cosine, unpolluted by tool lines.
+    tool_name_similarity = _tool_name_similarity(primary_calls, shadow_calls)
+    matched_arg_similarity = _matched_name_arg_similarity(primary_calls, shadow_calls)
+    if primary_text or shadow_text:
+        prose_similarity = cosine_similarity(build_embedding(primary_text), build_embedding(shadow_text))
+    else:
+        prose_similarity = None
+    if primary_calls or shadow_calls:
+        if tool_name_similarity is None:
+            functional_similarity = 0.0
+        elif matched_arg_similarity is None:
+            functional_similarity = tool_name_similarity * 0.5
+        else:
+            functional_similarity = 0.5 * tool_name_similarity + 0.5 * matched_arg_similarity
+    else:
+        functional_similarity = float(prose_similarity or 0.0)
+
     return {
         "primary_output_chars": len(primary_text),
         "shadow_output_chars": len(shadow_text),
@@ -2222,6 +2305,11 @@ def compare_response_outputs(primary_response: dict[str, Any] | None, shadow_res
         "shadow_output_sha256": sha256_text(shadow_signature),
         "text_similarity": round(float(text_similarity), 6),
         "tool_call_similarity": round(float(tool_call_similarity), 6) if tool_call_similarity is not None else None,
+        "tool_name_similarity": round(float(tool_name_similarity), 6) if tool_name_similarity is not None else None,
+        "matched_arg_similarity": round(float(matched_arg_similarity), 6) if matched_arg_similarity is not None else None,
+        "prose_similarity": round(float(prose_similarity), 6) if prose_similarity is not None else None,
+        "functional_similarity": round(float(functional_similarity), 6),
+        "relaxed_passed": float(functional_similarity) >= RELAXED_FUNCTIONAL_SIMILARITY_THRESHOLD,
         "output_similarity": round(float(similarity), 6),
         "passed_threshold": float(similarity) >= ROUTING_EXPERIMENT_SIMILARITY_THRESHOLD,
     }
@@ -2389,6 +2477,17 @@ def routing_experiment_feedback_features(
         "candidate_policy_shape": experiment_meta.get("candidate_policy_shape"),
         "candidate_bucket": f"{category}:{requested_model}->{routed_model}",
         "text_chars_bucket": _text_chars_bucket(experiment_meta.get("text_chars") or routing_meta.get("text_chars")),
+        # Proxy-computed difficulty labels (enum-only) so training evidence can be
+        # grouped finer than category x phase — e.g. the downgrade_risk="safe"
+        # slice of tool-result/thinking traffic.
+        "downgrade_risk": _public_label(
+            (_nested_or_empty(routing_meta.get("prompt_difficulty_features"))).get("downgrade_risk"),
+            fallback="unknown",
+        ),
+        "task_intent": _public_label(
+            (_nested_or_empty(routing_meta.get("prompt_difficulty_features"))).get("task_intent"),
+            fallback="unknown",
+        ),
         "routing_reason": routing_meta.get("reason"),
         "primary_status_code": primary_status_code,
         "shadow_status_code": shadow_status_code,
@@ -2401,6 +2500,11 @@ def routing_experiment_feedback_features(
         "primary_output_sha256": comparison.get("primary_output_sha256"),
         "shadow_output_sha256": comparison.get("shadow_output_sha256"),
         "output_similarity": comparison.get("output_similarity"),
+        "tool_name_similarity": comparison.get("tool_name_similarity"),
+        "matched_arg_similarity": comparison.get("matched_arg_similarity"),
+        "prose_similarity": comparison.get("prose_similarity"),
+        "functional_similarity": comparison.get("functional_similarity"),
+        "relaxed_passed": bool(comparison.get("relaxed_passed")),
         "similarity_threshold": experiment_meta.get("similarity_threshold"),
         "passed_threshold": bool(comparison.get("passed_threshold")),
         "reason_codes": reason_codes,
@@ -2482,6 +2586,8 @@ def routing_experiment_outcome_event(feedback_features: dict[str, Any]) -> dict[
             "provider": provider,
             "source_surface": source_surface,
             "text_chars_bucket": feedback_features.get("text_chars_bucket"),
+            "downgrade_risk": feedback_features.get("downgrade_risk") or "unknown",
+            "task_intent": feedback_features.get("task_intent") or "unknown",
             "requested_model_family": requested_family,
             "routed_model_family": routed_family,
             "shadow_model_family": shadow_family,
@@ -2499,6 +2605,11 @@ def routing_experiment_outcome_event(feedback_features: dict[str, Any]) -> dict[
             "shadow_status_class": shadow_status_class,
             "status_class_pair": f"{primary_status_class}:{shadow_status_class}",
             "output_similarity": feedback_features.get("output_similarity"),
+            "tool_name_similarity": feedback_features.get("tool_name_similarity"),
+            "matched_arg_similarity": feedback_features.get("matched_arg_similarity"),
+            "prose_similarity": feedback_features.get("prose_similarity"),
+            "functional_similarity": feedback_features.get("functional_similarity"),
+            "relaxed_passed": bool(feedback_features.get("relaxed_passed")),
             "similarity_threshold": feedback_features.get("similarity_threshold"),
             "latency_delta_ms": feedback_features.get("latency_delta_ms"),
             "cost_delta_usd": feedback_features.get("cost_delta_usd"),
