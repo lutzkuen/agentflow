@@ -2109,7 +2109,13 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                     cost = estimate_cost(str(crunched.get("model")), cost_in, cost_out, cache_creation_in, cache_read_in)
                     if cost is not None:
                         cost += summary_extra_cost
-                    cost_baseline = estimate_cost(requested_model, cost_in + cache_creation_in + cache_read_in, cost_out)
+                    # Price the counterfactual on the SAME provider cache profile as
+                    # the actual call. Folding cache reads into uncached input tokens
+                    # inflated the baseline (and the observed_savings_usd fed to
+                    # managed outcome feedback) ~22x on heavily-cached Claude Code
+                    # traffic; the dashboard's realized_savings_attribution has
+                    # always priced this counterfactual cache-aware.
+                    cost_baseline = estimate_cost(requested_model, cost_in, cost_out, cache_creation_in, cache_read_in)
                     if cache_creation_in or cache_read_in:
                         print(f"prompt_cache: creation={cache_creation_in} read={cache_read_in}")
                     if status_code >= 400 and error is None:
@@ -2633,7 +2639,8 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
         cost = estimate_cost(str(crunched.get("model")), cost_in, cost_out, cache_creation_in, cache_read_in)
         if cost is not None:
             cost += summary_extra_cost
-        cost_baseline = estimate_cost(requested_model, cost_in + cache_creation_in + cache_read_in, cost_out)
+        # Same cache-aware counterfactual as the streaming path above.
+        cost_baseline = estimate_cost(requested_model, cost_in, cost_out, cache_creation_in, cache_read_in)
         latency_ms = int((time.time() - started) * 1000)
         experiment_meta = routing_meta.get("routing_experiment")
         if not isinstance(experiment_meta, dict) or experiment_meta.get("mode") != "shadow_candidate_pass_through":
