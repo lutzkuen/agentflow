@@ -30,7 +30,7 @@ from tokenclaw.headers import (
 )
 from tokenclaw.limiter import TierBackoffActive, model_tier, tier_backoff_headers, tier_backoff_payload
 from tokenclaw.router import (
-    extract_text, has_tools, categorize_request, route_model,
+    extract_text, has_tools, categorize_request, classify_workflow_phase, route_model,
     STRIP_THINKING_HISTORY, _has_top_level_thinking, strip_thinking_history_blocks, uses_thinking,
 )
 from tokenclaw.crunch import (
@@ -186,6 +186,7 @@ def _anthropic_preflight_routing_meta(
     category: str | None,
 ) -> dict[str, Any]:
     text = extract_text(body)
+    phase_meta = classify_workflow_phase(body, category)
     return {
         "enabled": False,
         "requested_model": requested_model,
@@ -194,6 +195,8 @@ def _anthropic_preflight_routing_meta(
         "text_chars": len(text),
         "has_tools": has_tools(body),
         "category": category,
+        "workflow_phase": phase_meta.get("workflow_phase"),
+        "workflow_phase_reason": phase_meta.get("workflow_phase_reason"),
         "policy_source": "preflight",
         "provider": "anthropic",
         "prompt_difficulty_features": prompt_difficulty_features_from_text(text),
@@ -1565,6 +1568,8 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             stream=stream,
             input_tokens_est=preflight_input_tokens,
             session_id=session_id,
+            category=category,
+            workflow_phase=str(preflight_routing_meta.get("workflow_phase") or "") or None,
         )
         preflight_recommendation_unit = build_optimization_unit(
             provider="anthropic",

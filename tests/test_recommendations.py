@@ -298,6 +298,53 @@ class RecommendationTest(unittest.TestCase):
         self._assert_no_sensitive_strings(envelope)
         recommendations.assert_managed_egress_safe(envelope)
 
+    def test_request_facts_carry_predictor_learning_features(self):
+        # Regression: the request-facts decision path omitted category /
+        # workflow_phase / uses_thinking, so server-stored units degraded to
+        # "unknown" and no trained predictor rule could match live traffic.
+        envelope = recommendations.build_request_facts_envelope(
+            provider="anthropic",
+            path="/v1/messages",
+            body={
+                "model": "claude-opus-4-8",
+                "stream": True,
+                "thinking": {"type": "enabled", "budget_tokens": 4096},
+                "messages": [{"role": "user", "content": "summarize"}],
+            },
+            requested_model="claude-opus-4-8",
+            category="tool-heavy",
+            workflow_phase="summary",
+        )
+        facts = envelope["request_facts"]
+        self.assertEqual(facts["category"], "tool-heavy")
+        self.assertEqual(facts["workflow_phase"], "summary")
+        self.assertTrue(facts["uses_thinking"])
+        recommendations.assert_managed_egress_safe(envelope)
+
+        payload = recommendations._policy_decision_payload_from_request_facts(envelope)
+        input_features = payload["input_features"]
+        # These live in input_features so the client-contract filter's
+        # short-name section search finds them.
+        self.assertEqual(input_features["category"], "tool-heavy")
+        self.assertEqual(input_features["workflow_phase"], "summary")
+        self.assertTrue(input_features["uses_thinking"])
+        self.assertTrue(input_features["use_routing_predictor"])
+
+    def test_request_facts_omit_absent_classifier_labels(self):
+        envelope = recommendations.build_request_facts_envelope(
+            provider="anthropic",
+            path="/v1/messages",
+            body={"model": "claude-opus-4-8", "messages": [{"role": "user", "content": "x"}]},
+            requested_model="claude-opus-4-8",
+        )
+        facts = envelope["request_facts"]
+        self.assertIsNone(facts.get("category"))
+        self.assertIsNone(facts.get("workflow_phase"))
+        self.assertFalse(facts["uses_thinking"])
+        payload = recommendations._policy_decision_payload_from_request_facts(envelope)
+        self.assertNotIn("category", payload["input_features"])
+        self.assertNotIn("workflow_phase", payload["input_features"])
+
     def test_local_rules_only_disables_policy_fetch_before_network(self):
         os.environ["TOKENCLAW_LOCAL_RULES_ONLY"] = "1"
         os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"

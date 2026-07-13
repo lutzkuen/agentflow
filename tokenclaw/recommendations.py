@@ -36,7 +36,7 @@ from tokenclaw.pricing import codex_app_model, codex_app_processing_mode, estima
 from tokenclaw.prompt_features import PROMPT_DIFFICULTY_FEATURE_SCHEMA
 from tokenclaw.quality import derive_codex_turn_quality_signals, derive_provider_quality_signals
 from tokenclaw.store import stable_json, utc_now
-from tokenclaw.routing_experiments import routing_pathway_policy_decision
+from tokenclaw.routing_experiments import _public_label, routing_pathway_policy_decision
 from tokenclaw.terminal_features import TERMINAL_LOG_FEATURE_SCHEMA
 
 
@@ -269,6 +269,13 @@ def _metadata_text_char_count(value: Any) -> int:
     return 0
 
 
+def _request_uses_thinking(body: dict[str, Any]) -> bool:
+    thinking = body.get("thinking")
+    if isinstance(thinking, dict):
+        return str(thinking.get("type") or "").strip().lower() == "enabled"
+    return False
+
+
 def _message_item_counts(body: dict[str, Any]) -> dict[str, int]:
     messages = body.get("messages")
     input_items = body.get("input")
@@ -330,6 +337,8 @@ def build_request_facts_envelope(
     thread_id: str | None = None,
     request_id: str | None = None,
     local_executor_capabilities: dict[str, Any] | None = None,
+    category: str | None = None,
+    workflow_phase: str | None = None,
 ) -> dict[str, Any]:
     """Build a thin managed-optimizer envelope from directly known request facts."""
 
@@ -365,6 +374,13 @@ def build_request_facts_envelope(
         "tool_count": tool_facts["tool_count"],
         "tool_context_present": tool_facts["tool_context_present"],
         "response_format_present": bool(raw_body.get("response_format")),
+        # The routing predictor's rules key on category/workflow_phase (and thinking
+        # state), so the decision-path facts must carry them or the server-stored
+        # unit degrades to "unknown" and no trained rule can ever match live traffic.
+        # These are the proxy's own short classifier labels, not content.
+        "category": _public_label(category, fallback="") or None,
+        "workflow_phase": _public_label(workflow_phase, fallback="") or None,
+        "uses_thinking": _request_uses_thinking(raw_body),
         "local_executor_capabilities": capabilities,
         "grouping_identifiers": _compact_grouping_identifiers({
             "session_id_hash": session_id,
@@ -1369,6 +1385,14 @@ def _policy_decision_payload_from_request_facts(envelope: dict[str, Any]) -> dic
         "requested_local_actions": ["cache", "crunch", "routing"],
         "use_routing_predictor": True,
     }
+    # Short classifier labels ride in input_features because the client-contract
+    # filter resolves single-name plan fields (category / workflow_phase /
+    # uses_thinking) by searching sections in _SHORT_FIELD_SECTION_ORDER, which
+    # starts at input_features. Absent here, the stored unit degrades to
+    # "unknown" and no trained predictor rule can match it.
+    for fact_key in ("category", "workflow_phase", "uses_thinking"):
+        if facts.get(fact_key) is not None:
+            input_features[fact_key] = facts[fact_key]
     capabilities = facts.get("local_executor_capabilities")
     if isinstance(capabilities, dict):
         supported = capabilities.get("supported_local_action_families")
