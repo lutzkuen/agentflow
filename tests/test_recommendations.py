@@ -389,7 +389,7 @@ class RecommendationTest(unittest.TestCase):
             }
 
         with patch.object(recommendations, "_client_contract_for_payload", inactive_contract):
-            with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            with patch.object(recommendations, "async_client", FakeAsyncClient):
                 meta = asyncio.run(recommendations.fetch_policy_decision({
                     "source_surface": "anthropic_messages",
                     "granularity": "provider_request",
@@ -455,7 +455,7 @@ class RecommendationTest(unittest.TestCase):
         }
 
         with self._active_policy_contract_patch():
-            with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            with patch.object(recommendations, "async_client", FakeAsyncClient):
                 meta = asyncio.run(recommendations.fetch_policy_decision(rich_unit, request_facts=envelope))
 
         sent = FakeAsyncClient.last_json
@@ -544,7 +544,7 @@ class RecommendationTest(unittest.TestCase):
             return contract_meta
 
         with patch.object(recommendations, "_client_contract_for_payload", fake_contract):
-            with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            with patch.object(recommendations, "async_client", FakeAsyncClient):
                 meta = asyncio.run(recommendations.fetch_policy_decision(unit))
 
         sent = FakeAsyncClient.last_json
@@ -610,8 +610,23 @@ class RecommendationTest(unittest.TestCase):
             session_id="session-secret",
         )
 
-        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
-            meta = asyncio.run(recommendations.fetch_recommendation(unit))
+        # Contract negotiation must be explicitly inactive here: with the shared
+        # FakeAsyncClient, the recommendation fixture would otherwise double as
+        # the contract response and normalize into an active contract whose
+        # whitelist strips pattern_features from the posted unit.
+        async def inactive_contract(_payload):
+            return {
+                "schema": "tokenclaw.client_contract_meta.v1",
+                "enabled": True,
+                "active": False,
+                "status": "error",
+                "reason": "unreachable",
+                "fallback": "local-policy",
+            }
+
+        with patch.object(recommendations, "_client_contract_for_payload", inactive_contract):
+            with patch.object(recommendations, "async_client", FakeAsyncClient):
+                meta = asyncio.run(recommendations.fetch_recommendation(unit))
         body = {"model": "claude-sonnet-4-6"}
         applied = recommendations.apply_recommendation_to_body(
             provider="anthropic",
@@ -851,7 +866,7 @@ class RecommendationTest(unittest.TestCase):
             "policy_source": "local-default",
         }
 
-        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+        with patch.object(recommendations, "async_client", FakeAsyncClient):
             meta = asyncio.run(recommendations.fetch_recommendation({"requested_model": "claude-sonnet-4-6"}))
         body = {"model": "claude-sonnet-4-6"}
         applied = recommendations.apply_recommendation_to_body(
@@ -870,7 +885,7 @@ class RecommendationTest(unittest.TestCase):
         os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
         os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = ""
 
-        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+        with patch.object(recommendations, "async_client", FakeAsyncClient):
             meta = asyncio.run(recommendations.fetch_recommendation({"requested_model": "claude-sonnet-4-6"}))
 
         self.assertEqual(meta["status"], "skipped")
@@ -891,7 +906,7 @@ class RecommendationTest(unittest.TestCase):
             "privacy_summary": {"metadata_only": True, "raw_payload_included": False},
         }
 
-        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+        with patch.object(recommendations, "async_client", FakeAsyncClient):
             meta = asyncio.run(recommendations.fetch_recommendation(unsafe_unit))
 
         self.assertIsNone(FakeAsyncClient.last_url)
@@ -914,7 +929,7 @@ class RecommendationTest(unittest.TestCase):
         os.environ["TOKENCLAW_RECOMMENDATION_TIMEOUT_SECONDS"] = "0.1"
         FakeAsyncClient.error = httpx.TimeoutException("too slow")
 
-        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+        with patch.object(recommendations, "async_client", FakeAsyncClient):
             meta = asyncio.run(recommendations.fetch_recommendation({"requested_model": "claude-sonnet-4-6"}))
 
         self.assertEqual(FakeAsyncClient.last_timeout, 0.1)
@@ -927,7 +942,7 @@ class RecommendationTest(unittest.TestCase):
         os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
         FakeAsyncClient.error = httpx.ConnectError("connection refused")
 
-        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+        with patch.object(recommendations, "async_client", FakeAsyncClient):
             meta = asyncio.run(recommendations.fetch_recommendation({"requested_model": "claude-sonnet-4-6"}))
 
         self.assertEqual(meta["status"], "error")
@@ -939,11 +954,11 @@ class RecommendationTest(unittest.TestCase):
         os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
         FakeAsyncClient.response = FakeResponse(json_error=ValueError("not json"))
 
-        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+        with patch.object(recommendations, "async_client", FakeAsyncClient):
             invalid_json = asyncio.run(recommendations.fetch_recommendation({"requested_model": "claude-sonnet-4-6"}))
 
         FakeAsyncClient.response = FakeResponse(body={"target_model": "claude-haiku-4-5-20251001"})
-        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+        with patch.object(recommendations, "async_client", FakeAsyncClient):
             invalid_schema = asyncio.run(recommendations.fetch_recommendation({"requested_model": "claude-sonnet-4-6"}))
 
         self.assertEqual(invalid_json["status"], "invalid")
@@ -1010,7 +1025,7 @@ class RecommendationTest(unittest.TestCase):
         }
 
         with self._active_policy_contract_patch():
-            with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            with patch.object(recommendations, "async_client", FakeAsyncClient):
                 meta = asyncio.run(recommendations.fetch_policy_decision(unit))
 
         self.assertEqual(FakeAsyncClient.last_url, "http://127.0.0.1:4100/v1/policy-decision")
@@ -1141,7 +1156,7 @@ class RecommendationTest(unittest.TestCase):
         ]
 
         with self._active_policy_contract_patch(paths=paths):
-            with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            with patch.object(recommendations, "async_client", FakeAsyncClient):
                 meta = asyncio.run(recommendations.fetch_policy_decision(unit, request_facts=request_facts))
 
         sent = FakeAsyncClient.last_json
@@ -1217,7 +1232,7 @@ class RecommendationTest(unittest.TestCase):
             source_surface="openai_responses",
             app_family="generic_openai",
         ):
-            with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            with patch.object(recommendations, "async_client", FakeAsyncClient):
                 meta = asyncio.run(recommendations.fetch_policy_decision(unit))
 
         sent = FakeAsyncClient.last_json
@@ -1238,7 +1253,7 @@ class RecommendationTest(unittest.TestCase):
         FakeAsyncClient.error = httpx.TimeoutException("too slow")
 
         with self._active_policy_contract_patch():
-            with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            with patch.object(recommendations, "async_client", FakeAsyncClient):
                 timeout_meta = asyncio.run(recommendations.fetch_policy_decision({
                     "source_surface": "anthropic_messages",
                     "granularity": "provider_request",
@@ -1255,7 +1270,7 @@ class RecommendationTest(unittest.TestCase):
             "routing": {"status": "recommended", "target_model": "claude-haiku-4-5-20251001"},
         })
         with self._active_policy_contract_patch():
-            with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            with patch.object(recommendations, "async_client", FakeAsyncClient):
                 schema_meta = asyncio.run(recommendations.fetch_policy_decision({
                     "source_surface": "anthropic_messages",
                     "granularity": "provider_request",
@@ -1300,7 +1315,7 @@ class RecommendationTest(unittest.TestCase):
         })
 
         with self._active_policy_contract_patch():
-            with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            with patch.object(recommendations, "async_client", FakeAsyncClient):
                 meta = asyncio.run(recommendations.fetch_policy_decision({
                     "source_surface": "anthropic_messages",
                     "granularity": "provider_request",
@@ -1323,7 +1338,7 @@ class RecommendationTest(unittest.TestCase):
         os.environ["TOKENCLAW_POLICY_DECISIONS_ENABLED"] = "1"
 
         with self._active_policy_contract_patch():
-            with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            with patch.object(recommendations, "async_client", FakeAsyncClient):
                 meta = asyncio.run(recommendations.fetch_policy_decision({
                     "source_surface": "anthropic_messages",
                     "granularity": "provider_request",
@@ -1363,7 +1378,7 @@ class RecommendationTest(unittest.TestCase):
         })
 
         with self._active_policy_contract_patch():
-            with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            with patch.object(recommendations, "async_client", FakeAsyncClient):
                 meta = asyncio.run(recommendations.fetch_policy_decision({
                     "source_surface": "anthropic_messages",
                     "granularity": "provider_request",
@@ -1588,7 +1603,7 @@ class RecommendationTest(unittest.TestCase):
         })
 
         with self._active_policy_contract_patch():
-            with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            with patch.object(recommendations, "async_client", FakeAsyncClient):
                 meta = asyncio.run(recommendations.fetch_policy_decision({
                     "source_surface": "anthropic_messages",
                     "granularity": "provider_request",
@@ -1654,7 +1669,7 @@ class RecommendationTest(unittest.TestCase):
         FakeAsyncClient.error = RuntimeError("server unavailable")
         routing_meta = {"routed_model": "claude-sonnet-4-6"}
 
-        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+        with patch.object(recommendations, "async_client", FakeAsyncClient):
             meta = asyncio.run(recommendations.fetch_recommendation({"requested_model": "claude-sonnet-4-6"}))
         body = {"model": "claude-sonnet-4-6"}
         applied = recommendations.apply_recommendation_to_body(
@@ -1781,7 +1796,7 @@ class RecommendationTest(unittest.TestCase):
             ],
         )
 
-        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+        with patch.object(recommendations, "async_client", FakeAsyncClient):
             meta = asyncio.run(recommendations.send_outcome_feedback(recommendation_meta, outcome))
 
         self.assertEqual(FakeAsyncClient.last_url, "http://127.0.0.1:4100/v1/optimization-units/42/outcome")
@@ -1911,7 +1926,7 @@ class RecommendationTest(unittest.TestCase):
         }
         event = recommendations.build_old_context_summary_outcome_event(outcome)
 
-        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+        with patch.object(recommendations, "async_client", FakeAsyncClient):
             meta = asyncio.run(recommendations.queue_policy_event_feedback(
                 _NoQueueStore(),
                 event,
@@ -2000,7 +2015,7 @@ class RecommendationTest(unittest.TestCase):
         with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
             store = Store(tmp.name)
             try:
-                with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+                with patch.object(recommendations, "async_client", FakeAsyncClient):
                     meta = asyncio.run(
                         recommendations.queue_policy_event_feedback(
                             store,
@@ -2269,7 +2284,7 @@ class RecommendationTest(unittest.TestCase):
         with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
             store = Store(tmp.name)
             try:
-                with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+                with patch.object(recommendations, "async_client", FakeAsyncClient):
                     meta = asyncio.run(
                         recommendations.queue_outcome_feedback(
                             store,
@@ -2296,7 +2311,7 @@ class RecommendationTest(unittest.TestCase):
         os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
         FakeAsyncClient.error = RuntimeError("feedback unavailable")
 
-        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+        with patch.object(recommendations, "async_client", FakeAsyncClient):
             meta = asyncio.run(recommendations.send_outcome_feedback({"optimization_unit_id": 7}, {"status_code": 200}))
 
         self.assertEqual(meta["status"], "error")
@@ -2307,7 +2322,7 @@ class RecommendationTest(unittest.TestCase):
         os.environ["TOKENCLAW_RECOMMENDATION_ENABLED"] = "1"
         os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
 
-        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+        with patch.object(recommendations, "async_client", FakeAsyncClient):
             meta = asyncio.run(
                 recommendations.send_outcome_feedback(
                     {"optimization_unit_id": 7},
@@ -2362,7 +2377,7 @@ class RecommendationTest(unittest.TestCase):
         with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
             store = Store(tmp.name)
             try:
-                with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+                with patch.object(recommendations, "async_client", FakeAsyncClient):
                     meta = asyncio.run(
                         recommendations.queue_outcome_feedback(
                             store,
@@ -2424,7 +2439,7 @@ class RecommendationTest(unittest.TestCase):
                     attempts=0,
                     next_attempt_at="2000-01-01T00:00:00+00:00",
                 )
-                with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+                with patch.object(recommendations, "async_client", FakeAsyncClient):
                     results = asyncio.run(recommendations.flush_queued_outcome_feedback(store, limit=10))
                 row = store.conn.execute(
                     "select status, attempts, sent_at, last_status_code, last_error "
@@ -2466,7 +2481,7 @@ class RecommendationTest(unittest.TestCase):
                     attempts=0,
                     next_attempt_at="2000-01-01T00:00:00+00:00",
                 )
-                with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+                with patch.object(recommendations, "async_client", FakeAsyncClient):
                     results = asyncio.run(recommendations.flush_queued_outcome_feedback(store, limit=10))
                 row = store.conn.execute(
                     "select status, attempts, sent_at, last_status_code, last_error "
@@ -2500,7 +2515,7 @@ class RecommendationTest(unittest.TestCase):
         with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
             store = Store(tmp.name)
             try:
-                with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+                with patch.object(recommendations, "async_client", FakeAsyncClient):
                     meta = asyncio.run(
                         recommendations.queue_outcome_feedback(
                             store,
@@ -2543,7 +2558,7 @@ class RecommendationTest(unittest.TestCase):
             },
         }
 
-        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+        with patch.object(recommendations, "async_client", FakeAsyncClient):
             meta = asyncio.run(recommendations.queue_policy_event_feedback(_NoQueueStore(), event))
 
         self.assertIsNone(FakeAsyncClient.last_url)
@@ -2575,7 +2590,7 @@ class RecommendationTest(unittest.TestCase):
             },
         }
 
-        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+        with patch.object(recommendations, "async_client", FakeAsyncClient):
             meta = asyncio.run(recommendations.queue_policy_event_feedback(_NoQueueStore(), event))
 
         self.assertEqual(FakeAsyncClient.last_url, "http://managed.test/v1/policy-events")
