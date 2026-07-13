@@ -474,7 +474,7 @@ def _model_family(model: str | None) -> str | None:
     if not model:
         return None
     model_l = model.lower()
-    for family in ("haiku", "sonnet", "opus", "codex", "gpt-5", "gpt-4", "gpt-3"):
+    for family in ("haiku", "sonnet", "opus", "fable", "mythos", "codex", "gpt-5", "gpt-4", "gpt-3"):
         if family in model_l:
             return family
     return "other"
