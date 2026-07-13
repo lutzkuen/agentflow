@@ -270,10 +270,14 @@ def _metadata_text_char_count(value: Any) -> int:
 
 
 def _request_uses_thinking(body: dict[str, Any]) -> bool:
-    thinking = body.get("thinking")
-    if isinstance(thinking, dict):
-        return str(thinking.get("type") or "").strip().lower() == "enabled"
-    return False
+    # Delegate to the router's canonical detector: a thinking.type=="enabled"
+    # check alone misses effort-based thinking (Mythos-class models),
+    # interleaved_thinking, and assistant thinking history — which made every
+    # unit report uses_thinking=False and kept the thinking-tail crunch path
+    # from ever self-triggering on the dominant thinking traffic.
+    from tokenclaw.router import uses_thinking
+
+    return bool(uses_thinking(body))
 
 
 def _message_item_counts(body: dict[str, Any]) -> dict[str, int]:
