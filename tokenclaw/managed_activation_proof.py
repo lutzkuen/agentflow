@@ -387,6 +387,11 @@ def managed_activation_proof_cli(
     parser.add_argument("--drain-limit", type=int, default=25)
     parser.add_argument("--timeout", type=float, default=None)
     parser.add_argument("--pretty", action="store_true")
+    parser.add_argument(
+        "--push",
+        action="store_true",
+        help="POST the proof to the managed server's /v1/managed-activation-proofs ingest.",
+    )
     args = parser.parse_args(list(argv or []))
     stdout = stdout or os.sys.stdout
     stderr = stderr or os.sys.stderr
@@ -428,5 +433,81 @@ def managed_activation_proof_cli(
     except Exception as exc:
         stderr.write(f"managed activation proof failed: {exc}\n")
         return 1
+    if args.push:
+        # The proof only feeds the server's widen/promotion gates once it lands
+        # in the managed-history rollups; building it locally and printing it —
+        # what the retired orchestrator used to pipe onward — leaves those gates
+        # starved. The report is metadata-only by construction and re-validated
+        # server-side by the ingest schema's feature-boundary check.
+        report["push"] = asyncio.run(
+            push_managed_activation_proof(
+                report,
+                server_url=args.server_url,
+                timeout_seconds=args.timeout,
+            )
+        )
     write_json_output(stdout, report, pretty=args.pretty)
     return 0 if report.get("status") == "ok" else 2
+
+
+async def push_managed_activation_proof(
+    report: dict[str, Any],
+    *,
+    server_url: str,
+    timeout_seconds: float | None = None,
+) -> dict[str, Any]:
+    from tokenclaw.http_client import async_client
+    from tokenclaw.recommendations import _managed_headers
+
+    def _without_endpoint_paths(value: Any) -> Any:
+        # Stage diagnostics carry endpoint *paths* ("/v1/..."), which the ingest
+        # schema's identifier-boundary check rightly rejects as path-like. They
+        # are local diagnostics the server has no use for; drop them from the
+        # pushed copy only.
+        if isinstance(value, dict):
+            return {
+                key: _without_endpoint_paths(item)
+                for key, item in value.items()
+                if key != "endpoint"
+            }
+        if isinstance(value, list):
+            return [_without_endpoint_paths(item) for item in value]
+        return value
+
+    payload = {
+        key: _without_endpoint_paths(report[key])
+        for key in (
+            "schema",
+            "generated_at",
+            "status",
+            "reason",
+            "candidate_id",
+            "local_action_family",
+            "stages",
+            "summary",
+            "privacy_summary",
+        )
+        if key in report
+    }
+    url = server_url.rstrip("/") + "/v1/managed-activation-proofs"
+    try:
+        async with async_client(timeout=timeout_seconds or 10.0) as client:
+            response = await client.post(url, json=payload, headers=_managed_headers())
+        try:
+            body = response.json()
+        except Exception:
+            body = None
+        return {
+            "schema": "tokenclaw.managed_activation_proof_push.v1",
+            "status": "sent" if response.status_code < 400 else "error",
+            "status_code": response.status_code,
+            "ingest_status": body.get("status") if isinstance(body, dict) else None,
+            "metadata_only": True,
+        }
+    except Exception as exc:
+        return {
+            "schema": "tokenclaw.managed_activation_proof_push.v1",
+            "status": "error",
+            "error_class": type(exc).__name__,
+            "metadata_only": True,
+        }

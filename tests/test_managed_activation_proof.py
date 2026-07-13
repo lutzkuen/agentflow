@@ -235,3 +235,66 @@ class ManagedActivationProofTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PushManagedActivationProofTests(unittest.TestCase):
+    def test_push_payload_strips_endpoint_paths_and_posts(self):
+        import asyncio
+        from unittest.mock import patch
+        from tokenclaw import managed_activation_proof as module
+
+        report = {
+            "schema": "tokenclaw.managed_activation_proof.v1",
+            "status": "ok",
+            "candidate_id": "cache-exact-replay",
+            "local_action_family": "cache",
+            "stages": {
+                "feedback": {"status": "sent", "endpoint": "/v1/policy-events"},
+                "decision": {"status": "received", "endpoint": "/v1/policy-decision"},
+            },
+            "privacy_summary": {"metadata_only": True},
+            "push": {"should": "not-be-posted"},
+        }
+
+        captured = {}
+
+        class FakeResponse:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {"status": "stored"}
+
+        class FakeClient:
+            def __init__(self, timeout=None):
+                captured["timeout"] = timeout
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return None
+
+            async def post(self, url, json=None, headers=None):
+                captured["url"] = url
+                captured["json"] = json
+                captured["headers"] = headers
+                return FakeResponse()
+
+        with patch.object(module, "async_client", FakeClient, create=True):
+            with patch("tokenclaw.http_client.async_client", FakeClient):
+                result = asyncio.run(
+                    module.push_managed_activation_proof(
+                        report, server_url="http://127.0.0.1:4100", timeout_seconds=5
+                    )
+                )
+
+        self.assertEqual(result["status"], "sent")
+        self.assertEqual(result["status_code"], 200)
+        self.assertEqual(result["ingest_status"], "stored")
+        self.assertTrue(captured["url"].endswith("/v1/managed-activation-proofs"))
+        # Path-like endpoint diagnostics must not reach the ingest boundary,
+        # and local-only keys (push) are never part of the payload.
+        self.assertNotIn("endpoint", captured["json"]["stages"]["feedback"])
+        self.assertNotIn("endpoint", captured["json"]["stages"]["decision"])
+        self.assertNotIn("push", captured["json"])
