@@ -314,11 +314,17 @@ class RecommendationTest(unittest.TestCase):
             requested_model="claude-opus-4-8",
             category="tool-heavy",
             workflow_phase="summary",
+            prompt_difficulty_features={
+                "schema": "tokenclaw.prompt_difficulty_features.v1",
+                "task_intent": "summary",
+                "downgrade_risk": "safe",
+            },
         )
         facts = envelope["request_facts"]
         self.assertEqual(facts["category"], "tool-heavy")
         self.assertEqual(facts["workflow_phase"], "summary")
         self.assertTrue(facts["uses_thinking"])
+        self.assertEqual(facts["prompt_difficulty_features"]["downgrade_risk"], "safe")
         recommendations.assert_managed_egress_safe(envelope)
 
         payload = recommendations._policy_decision_payload_from_request_facts(envelope)
@@ -329,6 +335,13 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(input_features["workflow_phase"], "summary")
         self.assertTrue(input_features["uses_thinking"])
         self.assertTrue(input_features["use_routing_predictor"])
+        self.assertEqual(input_features["prompt_difficulty_features"]["task_intent"], "summary")
+        # Shape features the measurement plan grants for learning.
+        self.assertEqual(input_features["message_item_count"], 1)
+        self.assertIn("text_bucket", input_features)
+        self.assertIn("input_token_bucket", input_features)
+        self.assertIn("response_format_present", input_features)
+        self.assertIn("tool_context_present", payload["tool_features"])
 
     def test_request_facts_omit_absent_classifier_labels(self):
         envelope = recommendations.build_request_facts_envelope(

@@ -339,6 +339,7 @@ def build_request_facts_envelope(
     local_executor_capabilities: dict[str, Any] | None = None,
     category: str | None = None,
     workflow_phase: str | None = None,
+    prompt_difficulty_features: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a thin managed-optimizer envelope from directly known request facts."""
 
@@ -381,6 +382,14 @@ def build_request_facts_envelope(
         "category": _public_label(category, fallback="") or None,
         "workflow_phase": _public_label(workflow_phase, fallback="") or None,
         "uses_thinking": _request_uses_thinking(raw_body),
+        # Bucketed/enum-only difficulty signals (task_intent, downgrade_risk,
+        # multi-step likelihood, ...) computed locally from text that never leaves
+        # the proxy. Prime training features for the routing predictor.
+        "prompt_difficulty_features": (
+            dict(prompt_difficulty_features)
+            if isinstance(prompt_difficulty_features, dict) and prompt_difficulty_features
+            else None
+        ),
         "local_executor_capabilities": capabilities,
         "grouping_identifiers": _compact_grouping_identifiers({
             "session_id_hash": session_id,
@@ -1390,7 +1399,7 @@ def _policy_decision_payload_from_request_facts(envelope: dict[str, Any]) -> dic
     # uses_thinking) by searching sections in _SHORT_FIELD_SECTION_ORDER, which
     # starts at input_features. Absent here, the stored unit degrades to
     # "unknown" and no trained predictor rule can match it.
-    for fact_key in ("category", "workflow_phase", "uses_thinking"):
+    for fact_key in ("category", "workflow_phase", "uses_thinking", "prompt_difficulty_features"):
         if facts.get(fact_key) is not None:
             input_features[fact_key] = facts[fact_key]
     capabilities = facts.get("local_executor_capabilities")

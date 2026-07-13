@@ -1570,6 +1570,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             session_id=session_id,
             category=category,
             workflow_phase=str(preflight_routing_meta.get("workflow_phase") or "") or None,
+            prompt_difficulty_features=preflight_routing_meta.get("prompt_difficulty_features"),
         )
         preflight_recommendation_unit = build_optimization_unit(
             provider="anthropic",
