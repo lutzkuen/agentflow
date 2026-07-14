@@ -8,6 +8,7 @@ from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest import mock
 
 from tokenclaw import cli
 from tokenclaw.managed_egress import assert_managed_egress_safe
@@ -388,7 +389,7 @@ blocklist:
             finally:
                 store.conn.close()
 
-        self.assertEqual(report["policy"]["profile_id"], "first-safe-openai-codex-claude-shadow-pass-through-v1")
+        self.assertEqual(report["policy"]["profile_id"], "guardrails-plus-deterministic-fallback-v2")
         self.assertEqual(report["summary"]["sample_count"], 0)
         self.assertEqual(report["policy"]["mode"], experiments.ROUTING_EXPERIMENT_MODE)
         self.assertEqual(report["decision_reasons"][0]["provider"], "openai")
@@ -1709,6 +1710,178 @@ routing_candidates:
         self.assertIn("lifecycle_outcomes", report)
         self.assertEqual(report["summary"]["routing_lifecycle_applied_count"], 1)
         self.assertEqual(report["summary"]["routing_lifecycle_holdout_count"], 1)
+
+
+class ServerIssuedExperimentPolicyPrecedenceTest(unittest.TestCase):
+    """Phase 3 (#935): server plan -> local guardrail -> off."""
+
+    def setUp(self):
+        from tokenclaw import routing_experiment_policy_client as policy_client
+
+        self.policy_client = policy_client
+        policy_client.clear_routing_experiment_policy_cache()
+        self.addCleanup(policy_client.clear_routing_experiment_policy_cache)
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+        self.addCleanup(lambda: os.environ.pop("TOKENCLAW_RECOMMENDATION_SERVER_URL", None))
+
+    def _seed_server_policy(self, *, candidates=None, controls=None, safety_stops=None):
+        expires = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        policy = {
+            "schema": "tokenclaw.routing_experiment_policy.v1",
+            "policy_id": "routing-experiment-policy:openai:openai_responses:generic_openai:v1",
+            "expires_at": expires,
+            "expires_at_epoch": datetime.now(timezone.utc).timestamp() + 3600,
+            "provider": "openai",
+            "source_surface": "openai_responses",
+            "app_family": "generic_openai",
+            "controls": {
+                "enabled": True,
+                "kill_switch": False,
+                "sample_rate": 1.0,
+                "holdout_rate": 0.0,
+                "daily_budget_usd": 5.0,
+                "min_text_chars": 0,
+                "max_text_chars": 0,
+                **(controls or {}),
+            },
+            "candidates": candidates
+            if candidates is not None
+            else [
+                {
+                    "candidate_id": "routing-experiment:openai:openai_responses:generic_openai:gpt-5.6-sol:gpt-5.6-terra:shadow",
+                    "requested_model": "gpt-5.6-sol*",
+                    "routed_model": "gpt-5.6-terra",
+                    "provider": "openai",
+                    "source_surface": "openai_responses",
+                    "app_family": "generic_openai",
+                    "eligibility": {"min_text_chars": 0, "max_text_chars": 0, "stream": False},
+                    "sample_rate": 1.0,
+                    "sample_weight": 1.0,
+                    "daily_budget_usd": 5.0,
+                }
+            ],
+            "safety_stops": safety_stops or [],
+            "provenance": {"signed": True, "algorithm": "hmac-sha256", "signature": "sig"},
+            "signature_verification": {"verified": False, "reason": "verification-secret-not-configured"},
+        }
+        self.policy_client._POLICY_CACHE[("openai", "openai_responses", "generic_openai")] = policy
+        return policy
+
+    def _decision(self, requested="gpt-5.6-sol", random_value=0.0, category="chat", stream=False):
+        return experiments.routing_experiment_decision(
+            {"model": requested, "input": "hello"},
+            {
+                "requested_model": requested,
+                "routed_model": requested,
+                "category": category,
+                "text_chars": 120,
+            },
+            stream=stream,
+            provider="openai",
+            source_surface="openai_responses",
+            store_obj=None,
+            random_value=lambda: random_value,
+        )
+
+    def test_server_policy_backs_openai_shadow_and_samples_server_candidate(self):
+        self._seed_server_policy()
+        meta = self._decision()
+
+        self.assertTrue(meta["sampled"])
+        self.assertTrue(str(meta["policy_source"]).startswith("managed-issued:"))
+        self.assertEqual(meta["shadow_model"], "gpt-5.6-terra")
+        self.assertEqual(meta["candidate_policy_shape"], "server-issued-candidates")
+        self.assertEqual(meta["sample_rate_scope"], "candidate")
+        self.assertTrue(meta["server_experiment_policy"]["active"])
+        self.assertEqual(
+            meta["server_experiment_policy"]["reason"],
+            "loopback-unverified-signature-accepted",
+        )
+        # Server budget (5.0) is capped into the local budget (10.0) via min().
+        self.assertEqual(meta["daily_budget_usd"], 5.0)
+        self.assertEqual(meta["daily_budget_scope"], "server-issued-capped-by-local")
+
+    def test_without_server_policy_local_yaml_stays_off(self):
+        meta = self._decision()
+
+        self.assertFalse(meta["sampled"])
+        self.assertEqual(meta["reason"], "no-backed-routing")
+        self.assertFalse(meta["server_experiment_policy"]["active"])
+
+    def test_unverified_signature_rejected_for_non_loopback_server(self):
+        os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "https://managed.example.com"
+        self._seed_server_policy()
+        meta = self._decision()
+
+        self.assertFalse(meta["sampled"])
+        self.assertEqual(meta["reason"], "no-backed-routing")
+        self.assertFalse(meta["server_experiment_policy"]["active"])
+        self.assertTrue(
+            str(meta["server_experiment_policy"]["reason"]).startswith("signature-unverified:")
+        )
+
+    def test_local_kill_switch_vetoes_server_policy(self):
+        self._seed_server_policy()
+        with mock.patch.dict(experiments.ROUTING_EXPERIMENT_POLICY, {"kill_switch": True}):
+            meta = self._decision()
+
+        self.assertFalse(meta["sampled"])
+        self.assertEqual(meta["reason"], "kill-switch")
+
+    def test_server_kill_switch_stops_experiments(self):
+        self._seed_server_policy(controls={"kill_switch": True})
+        meta = self._decision()
+
+        self.assertFalse(meta["sampled"])
+        self.assertEqual(meta["reason"], "kill-switch")
+        self.assertEqual(meta["kill_switch_source"], "server-issued")
+
+    def test_local_blocklist_vetoes_server_candidate(self):
+        self._seed_server_policy()
+        blocklist = [{"requested_model": "gpt-5.6-sol", "routed_model": "gpt-5.6-terra"}]
+        with mock.patch.dict(experiments.ROUTING_EXPERIMENT_POLICY, {"blocklist": blocklist}):
+            meta = self._decision()
+
+        self.assertFalse(meta["sampled"])
+        self.assertEqual(meta["reason"], "model-pair-blocked")
+
+    def test_server_matrix_miss_does_not_fall_back_to_local_minting(self):
+        self._seed_server_policy(candidates=[])
+        meta = self._decision()
+
+        self.assertFalse(meta["sampled"])
+        self.assertEqual(meta["reason"], "server-policy-no-eligible-candidate")
+
+    def test_server_spend_safety_stop_is_enforced_locally(self):
+        self._seed_server_policy(
+            safety_stops=[
+                {
+                    "stop_id": "daily-shadow-budget",
+                    "metric": "spend_usd",
+                    "threshold": 0.0,
+                    "comparator": "gte",
+                    "window_seconds": 86400,
+                    "min_samples": 1,
+                    "action": "hold",
+                    "reason_code": "routing-experiment-budget-safety-stop",
+                }
+            ]
+        )
+        meta = self._decision()
+
+        self.assertFalse(meta["sampled"])
+        self.assertEqual(meta["reason"], "routing-experiment-budget-safety-stop")
+        self.assertTrue(meta["server_safety_stops"]["tripped"])
+
+    def test_default_policy_is_guardrails_plus_fallback_only(self):
+        policy = experiments._default_experiment_policy()
+
+        self.assertEqual(policy["routing_candidates"], [])
+        self.assertEqual(policy["model_pairs"], [])
+        self.assertTrue(policy["fallback_routes"])
+        self.assertIn("blocklist", policy)
+        self.assertIn("preferred_pathways", policy)
+        self.assertIn("kill_switch", policy)
 
 
 if __name__ == "__main__":

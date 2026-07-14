@@ -61,7 +61,9 @@ from tokenclaw.provider_adoption import capture_provider_tool_adoption
 from tokenclaw.routing_experiments import (
     ROUTING_EXPERIMENT_OUTCOME_SOURCE_SURFACE,
     ROUTING_EXPERIMENT_STORE_RESPONSE_BODIES,
+    _app_family as _experiment_app_family,
     compare_response_outputs,
+    prefetch_server_experiment_policy,
     routing_experiment_outcome_event,
     routing_experiment_feedback_features,
     routing_experiment_decision,
@@ -1630,6 +1632,13 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
         if _n_stripped > 0:
             routing_meta["thinking_history_stripped"] = _n_stripped
         resolved_requested_model = crunched.get("model", requested_model)
+        routing_meta["server_experiment_policy_fetch"] = await prefetch_server_experiment_policy(
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            app_family=_experiment_app_family(
+                "anthropic", "anthropic_messages", str(resolved_requested_model)
+            ),
+        )
         experiment_meta = routing_experiment_decision(
             crunched,
             {

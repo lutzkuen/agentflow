@@ -77,7 +77,9 @@ from tokenclaw.recommendations import queue_policy_event_feedback
 from tokenclaw.routing_experiments import (
     ROUTING_EXPERIMENT_OUTCOME_SOURCE_SURFACE,
     ROUTING_EXPERIMENT_STORE_RESPONSE_BODIES,
+    _app_family as _experiment_app_family,
     compare_response_outputs,
+    prefetch_server_experiment_policy,
     routing_experiment_decision,
     routing_experiment_feedback_features,
     routing_experiment_outcome_event,
@@ -860,12 +862,18 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
             session_id=session_id,
         )
         call_fields = openai_call_store_fields(path, requested_model, str(crunched.get("model")))
+        experiment_source_surface = str(call_fields.get("source_surface") or "openai_responses")
+        routing_meta["server_experiment_policy_fetch"] = await prefetch_server_experiment_policy(
+            provider="openai",
+            source_surface=experiment_source_surface,
+            app_family=_experiment_app_family("openai", experiment_source_surface, requested_model),
+        )
         experiment_meta = routing_experiment_decision(
             crunched,
             routing_meta,
             stream=stream,
             provider="openai",
-            source_surface=str(call_fields.get("source_surface") or "openai_responses"),
+            source_surface=experiment_source_surface,
             store_obj=context.store,
         )
         routing_meta["routing_experiment"] = experiment_meta

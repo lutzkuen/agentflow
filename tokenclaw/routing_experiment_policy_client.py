@@ -6,12 +6,12 @@ the routing-experiment candidate matrix, sample fractions, budgets, eligibility,
 stops move from the local `routing_experiments.yaml` (loaded once at process start, requiring
 a restart to change) into `tokenclaw_server`, delivered at runtime as a signed, TTL'd bundle.
 
-This module owns *delivery only* — fetch -> validate -> cache by (provider, source_surface,
-app_family), mirroring the established `client_contract.py` pattern. It intentionally does
-**not** wire itself into the live routing decision path (`routing_pathway_policy_decision` in
-routing_experiments.py) yet; that hot-apply + server->guardrail->off precedence step is scoped
-to a follow-up (mirrors issue #935's decision-precedence requirement) so this lands as one
-small, reviewable increment per a single pass.
+This module owns *delivery* — fetch -> validate -> cache by (provider, source_surface,
+app_family), mirroring the established `client_contract.py` pattern. Consumption lives in
+routing_experiments.py (Phase 3, issue #935): the async proxies keep this cache warm via
+`prefetch_server_experiment_policy`, and the synchronous `routing_experiment_decision` reads
+it through `get_cached_routing_experiment_policy` under the server -> local guardrail -> off
+precedence.
 
 Trust note: unlike `/v1/client-contract` (a read-only measurement plan the server may issue
 unsigned in local-dev mode), `/v1/routing-experiment-policy` drives live model-routing
@@ -44,6 +44,12 @@ ROUTING_EXPERIMENT_POLICY_META_SCHEMA = "tokenclaw.routing_experiment_policy_met
 ROUTING_EXPERIMENT_POLICY_LOCAL_CAPABILITY = "routing-experiment-policy"
 
 _POLICY_CACHE: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+# Negative cache: after a failed fetch, skip re-fetching this scope until the
+# deadline so a down server costs one timeout per backoff window, not one per
+# provider request.
+_FETCH_BACKOFF: dict[tuple[str, str, str], float] = {}
+_FETCH_BACKOFF_SECONDS = 60.0
 
 _REQUIRED_CONTROLS_KEYS = (
     "enabled",
@@ -94,6 +100,21 @@ class RoutingExperimentPolicyClient:
 
 def clear_routing_experiment_policy_cache() -> None:
     _POLICY_CACHE.clear()
+    _FETCH_BACKOFF.clear()
+
+
+def get_cached_routing_experiment_policy(
+    *, provider: str, source_surface: str, app_family: str
+) -> dict[str, Any] | None:
+    """Synchronous unexpired-cache lookup for the live decision path.
+
+    The decision function is synchronous and must never wait on the network;
+    the async prefetch in the proxy request handlers keeps this cache warm.
+    """
+    cached = _POLICY_CACHE.get((provider, source_surface, app_family))
+    if cached and float(cached.get("expires_at_epoch") or 0) > time.time():
+        return copy.deepcopy(cached)
+    return None
 
 
 def routing_experiment_policy_base_meta(
@@ -358,6 +379,15 @@ async def fetch_or_get_routing_experiment_policy(
         return meta
     if cached:
         _POLICY_CACHE.pop(key, None)
+    backoff_until = _FETCH_BACKOFF.get(key, 0.0)
+    if backoff_until > now:
+        meta.update({
+            "status": "skipped",
+            "reason": "fetch-backoff",
+            "cache_status": "miss",
+            "backoff_remaining_seconds": round(backoff_until - now, 3),
+        })
+        return meta
 
     if client is None:
         client = RoutingExperimentPolicyClient(base_url=server_url, headers={}, timeout_seconds=1.5)
@@ -366,6 +396,7 @@ async def fetch_or_get_routing_experiment_policy(
         meta["latency_ms"] = latency_ms
         meta["status_code"] = status_code
         if status_code >= 400:
+            _FETCH_BACKOFF[key] = now + _FETCH_BACKOFF_SECONDS
             meta.update({
                 "status": "error",
                 "reason": "server-error",
@@ -395,11 +426,14 @@ async def fetch_or_get_routing_experiment_policy(
         })
         return meta
     except httpx.TimeoutException as exc:
+        _FETCH_BACKOFF[key] = now + _FETCH_BACKOFF_SECONDS
         meta.update({"status": "error", "reason": "timeout", "error": repr(exc), "cache_status": "miss"})
         return meta
     except httpx.NetworkError as exc:
+        _FETCH_BACKOFF[key] = now + _FETCH_BACKOFF_SECONDS
         meta.update({"status": "error", "reason": "unreachable", "error": repr(exc), "cache_status": "miss"})
         return meta
     except Exception as exc:
+        _FETCH_BACKOFF[key] = now + _FETCH_BACKOFF_SECONDS
         meta.update({"status": "error", "reason": "fetch-error", "error": repr(exc), "cache_status": "miss"})
         return meta

@@ -1,22 +1,27 @@
-# TokenClaw default A/B routing experiment policy.
+# TokenClaw local routing-experiment guardrails + deterministic fallback.
 # Copy to ~/.tokenclaw/routing_experiments.yaml (or set TOKENCLAW_ROUTING_EXPERIMENTS)
-# to override routing experiment sampling. The active default keeps the user-visible
-# call on the requested model and records shadow-only route-down evidence for
-# the configured cheaper candidate. routing_candidates are evidence-collection
-# candidates, not active user-visible routing rules.
+# to override.
+#
+# Phase 3 of the server-issued experiment-policy migration (#932/#935): this
+# file no longer carries a candidate matrix. The standing candidates, sample
+# fractions, and per-candidate budgets are issued by tokenclaw_server as a
+# signed, TTL'd tokenclaw.routing_experiment_policy.v1 bundle and hot-applied
+# by the proxy. Decision precedence: server plan -> local guardrail -> off.
+# What this file keeps:
+#   - guardrails: kill_switch, blocklist, preferred_pathways, and the control
+#     caps (sample_rate / daily_budget_usd / text-char bounds) that the server
+#     policy can never exceed — local safety always wins;
+#   - a tiny deterministic fallback (fallback_routes) so the proxy stays
+#     useful with the server off. No local-minted matrix (backed-or-off).
 #
 # Response bodies are not stored unless store_response_bodies is explicitly enabled.
-# When Anthropic requested model IDs advance, add adjacent Opus shadow
-# candidates here and extend the default-policy coverage test in
-# tests/test_routing_experiments.py so new traffic cannot silently collect
-# zero route-down evidence.
 
-profile_id: first-safe-openai-codex-claude-shadow-pass-through-v1
+profile_id: guardrails-plus-deterministic-fallback-v2
 mode: shadow_candidate_pass_through
 enabled: true
 kill_switch: false
 sample_rate: 0.10
-daily_budget_usd: 10.0
+daily_budget_usd: 100.0
 min_text_chars: 0
 max_text_chars: 0
 providers:
@@ -65,195 +70,13 @@ fallback_routes:
     routed_model: gpt-5-mini
   - requested_model: gpt-5.3
     routed_model: gpt-5-mini
-model_pairs:
-  - requested_model: claude-sonnet-4-6
-    routed_model: claude-haiku-4-5-20251001
-  - requested_model: claude-opus-4-8
-    routed_model: claude-sonnet-4-6
-  - requested_model: claude-opus-4-5
-    routed_model: claude-sonnet-4-6
-  # Legacy fallback pairs for older parsers. Newer TokenClaw uses
-  # routing_candidates below so multiple candidates can be scoped safely.
-  - requested_model: gpt-5.6-sol
-    routed_model: gpt-5.6-terra
-  - requested_model: gpt-5.6-terra
-    routed_model: gpt-5.6-luna
-  - requested_model: gpt-5.6-luna
-    routed_model: gpt-5-mini
-  - requested_model: gpt-5.6
-    routed_model: gpt-5.6-terra
-  - requested_model: gpt-5.5
-    routed_model: gpt-5.6-terra
-  - requested_model: gpt-5.4
-    routed_model: gpt-5.6-luna
-  - requested_model: gpt-5.3-codex
-    routed_model: gpt-5-codex
-  - requested_model: gpt-5-codex
-    routed_model: gpt-5-mini
-  - requested_model: gpt-5.3
-    routed_model: gpt-5-mini
-routing_candidates:
-  # Existing Anthropic shadow evidence paths stay available in candidate mode.
-  - candidate_id: anthropic-sonnet46-to-haiku45-short
-    label: Anthropic Sonnet 4.6 to Haiku 4.5 short evidence
-    requested_model: claude-sonnet-4-6
-    routed_model: claude-haiku-4-5-20251001
-    provider: anthropic
-    source_surface: anthropic_messages
-    app_family: claude_code
-    category: short-completion
-    max_text_chars: 0
-  - candidate_id: anthropic-sonnet46-to-haiku45-tool-result-stream
-    label: Anthropic Sonnet 4.6 to Haiku 4.5 streaming tool-result evidence
-    requested_model: claude-sonnet-4-6
-    routed_model: claude-haiku-4-5-20251001
-    provider: anthropic
-    source_surface: anthropic_messages
-    app_family: claude_code
-    category: tool-result
-    stream: true
-    max_text_chars: 0
-    sample_rate: 0.10
-  - candidate_id: anthropic-opus45-to-sonnet46-chat
-    label: Anthropic Opus 4.5 to Sonnet 4.6 chat evidence
-    requested_model: claude-opus-4-5
-    routed_model: claude-sonnet-4-6
-    provider: anthropic
-    source_surface: anthropic_messages
-    app_family: claude_code
-    category: chat
-    max_text_chars: 0
-  - candidate_id: anthropic-opus48-to-sonnet46-chat
-    label: Anthropic Opus 4.8 to Sonnet 4.6 chat evidence
-    requested_model: claude-opus-4-8
-    routed_model: claude-sonnet-4-6
-    provider: anthropic
-    source_surface: anthropic_messages
-    app_family: claude_code
-    category: chat
-    max_text_chars: 0
-  - candidate_id: anthropic-opus48-to-sonnet46-tool-result-stream
-    label: Anthropic Opus 4.8 to Sonnet 4.6 streaming tool-result evidence
-    requested_model: claude-opus-4-8
-    routed_model: claude-sonnet-4-6
-    provider: anthropic
-    source_surface: anthropic_messages
-    app_family: claude_code
-    category: tool-result
-    stream: true
-    max_text_chars: 0
-    sample_rate: 0.10
-  - candidate_id: anthropic-opus48-to-sonnet46-tool-light
-    label: Anthropic Opus 4.8 to Sonnet 4.6 tool-light evidence
-    requested_model: claude-opus-4-8
-    routed_model: claude-sonnet-4-6
-    provider: anthropic
-    source_surface: anthropic_messages
-    app_family: claude_code
-    category: tool-light
-    max_text_chars: 0
-
-  # Codex app / Codex-like traffic: prefer Codex-specialized adjacent candidates.
-  - candidate_id: codex-gpt56-to-terra-summary
-    label: Codex gpt-5.6 to gpt-5.6-terra for summary evidence
-    requested_model: gpt-5.6
-    routed_model: gpt-5.6-terra
-    provider: openai
-    source_surface: codex_turn
-    app_family: codex
-    category: codex-turn
-    workflow_phase: summary
-    max_text_chars: 0
-    sample_weight: 4
-  - candidate_id: codex-gpt56-to-terra-unknown-phase
-    label: Codex gpt-5.6 to gpt-5.6-terra when phase is not yet classified
-    requested_model: gpt-5.6
-    routed_model: gpt-5.6-terra
-    provider: openai
-    source_surface: codex_turn
-    app_family: codex
-    category: codex-turn
-    workflow_phase: unknown
-    max_text_chars: 0
-  - candidate_id: codex-gpt53-codex-to-gpt5-codex-summary
-    label: Codex gpt-5.3-codex to gpt-5-codex for summary evidence
-    requested_model: gpt-5.3-codex
-    routed_model: gpt-5-codex
-    provider: openai
-    source_surface: codex_turn
-    app_family: codex
-    category: codex-turn
-    workflow_phase: summary
-    max_text_chars: 0
-  - candidate_id: codex-gpt5-codex-to-mini-short-summary
-    label: Codex gpt-5-codex to mini for short summary evidence
-    requested_model: gpt-5-codex
-    routed_model: gpt-5-mini
-    provider: openai
-    source_surface: codex_turn
-    app_family: codex
-    category: codex-turn
-    workflow_phase: summary
-    max_text_chars: 0
-    sample_rate: 0.05
-
-  # Generic OpenAI traffic: collect adjacent evidence down the 5.6 tier
-  # ladder; deprecated 5.5/5.4 candidate to their current-generation rung.
-  - candidate_id: generic-gpt56-sol-to-terra-chat
-    label: Generic OpenAI gpt-5.6-sol to gpt-5.6-terra adjacent evidence
-    requested_model: gpt-5.6-sol
-    routed_model: gpt-5.6-terra
-    provider: openai
-    source_surface: openai_responses
-    app_family: generic_openai
-    category: chat
-    max_text_chars: 0
-    sample_weight: 4
-  - candidate_id: generic-gpt56-terra-to-luna-chat
-    label: Generic OpenAI gpt-5.6-terra to gpt-5.6-luna adjacent evidence
-    requested_model: gpt-5.6-terra
-    routed_model: gpt-5.6-luna
-    provider: openai
-    source_surface: openai_responses
-    app_family: generic_openai
-    category: chat
-    max_text_chars: 0
-  - candidate_id: generic-gpt56-luna-to-mini-short
-    label: Generic OpenAI gpt-5.6-luna to mini short evidence
-    requested_model: gpt-5.6-luna
-    routed_model: gpt-5-mini
-    provider: openai
-    source_surface: openai_responses
-    app_family: generic_openai
-    category: short-completion
-    max_text_chars: 0
-  - candidate_id: generic-gpt55-to-terra-chat
-    label: Generic OpenAI deprecated gpt-5.5 to gpt-5.6-terra evidence
-    requested_model: gpt-5.5
-    routed_model: gpt-5.6-terra
-    provider: openai
-    source_surface: openai_responses
-    app_family: generic_openai
-    category: chat
-    max_text_chars: 0
-  - candidate_id: generic-gpt54-to-luna-chat
-    label: Generic OpenAI deprecated gpt-5.4 to gpt-5.6-luna evidence
-    requested_model: gpt-5.4
-    routed_model: gpt-5.6-luna
-    provider: openai
-    source_surface: openai_responses
-    app_family: generic_openai
-    category: chat
-    max_text_chars: 0
-  - candidate_id: generic-gpt53-to-mini-short
-    label: Generic OpenAI gpt-5.3 to mini short evidence
-    requested_model: gpt-5.3
-    routed_model: gpt-5-mini
-    provider: openai
-    source_surface: openai_responses
-    app_family: generic_openai
-    category: short-completion
-    max_text_chars: 0
+# Phase 3 (#935): the local file is guardrails + a tiny deterministic fallback.
+# The standing candidate matrix, sample fractions, and per-candidate budgets are
+# server-issued (tokenclaw.routing_experiment_policy.v1) when the managed feed is
+# backed; without backing there is no local-minted matrix (backed-or-off). The
+# controls above are local caps the server can never exceed.
+model_pairs: []
+routing_candidates: []
 workflow_phases: []
 categories:
   - chat
@@ -262,25 +85,7 @@ categories:
   - tool-result
   - tool-heavy
   - codex-turn
-eligibility_overrides:
-  - scope: category
-    provider: anthropic
-    source_surface: anthropic_messages
-    category: chat
-    max_text_chars: 0
-  - scope: category
-    provider: anthropic
-    source_surface: anthropic_messages
-    category: tool-light
-    max_text_chars: 0
-  - scope: category
-    provider: anthropic
-    source_surface: anthropic_messages
-    category: tool-result
-    stream: true
-    max_text_chars: 0
-    sample_rate: 0.10
-    daily_budget_usd: 10.0
+eligibility_overrides: []
 similarity_threshold: 0.86
 min_samples_for_confidence: 20
 store_response_bodies: false

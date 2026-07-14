@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import os
@@ -14,6 +15,12 @@ import yaml
 from tokenclaw.crunch import build_embedding, sha256_text
 from tokenclaw.paths import tokenclaw_config_path
 from tokenclaw.policy_files import policy_file_snapshot, utc_now
+from tokenclaw.routing_experiment_policy_client import (
+    RoutingExperimentPolicyClient,
+    RoutingExperimentPolicyRequest,
+    fetch_or_get_routing_experiment_policy,
+    get_cached_routing_experiment_policy,
+)
 from tokenclaw.store import cosine_similarity, stable_json
 
 _PUBLIC_LABEL_RAW_MARKERS = (
@@ -121,24 +128,27 @@ def _safe_candidate_id(value: Any, *, fallback: str) -> str:
 
 
 def _default_experiment_policy() -> dict[str, Any]:
+    # Phase 3 of the server-issued experiment-policy migration (#935): the
+    # local default is guardrails + a tiny deterministic fallback only. The
+    # standing candidate matrix, sample fractions, and per-candidate budgets
+    # come from the server-issued tokenclaw.routing_experiment_policy.v1
+    # bundle when backed (see _resolve_server_experiment_policy); without
+    # backing there is no local-minted matrix (backed-or-off). The controls
+    # kept here act as local caps the server can never exceed.
+    #
+    # Providers stays ["openai"] on purpose: server-directed anthropic shadows
+    # run through _managed_shadow_experiment_decision (per-request forcing),
+    # so admitting anthropic here would double-shadow the same traffic.
     return {
-        "profile_id": "first-safe-openai-codex-claude-shadow-pass-through-v1",
+        "profile_id": "guardrails-plus-deterministic-fallback-v2",
         "mode": "shadow_candidate_pass_through",
         "enabled": True,
         "kill_switch": False,
         "thin_client_routing": True,
         "sample_rate": 0.10,
-        "daily_budget_usd": 10.0,
+        "daily_budget_usd": 100.0,
         "min_text_chars": 0,
         "max_text_chars": 8000,
-        # Local canary origination is disabled (see the "Backed or off" gate in
-        # routing_experiment_decision): the managed server decides anthropic canaries,
-        # and server-directed anthropic shadows are executed via
-        # _managed_shadow_experiment_decision, not this policy. Only the server-forced
-        # OpenAI/codex shadow path still flows through this local policy, so only its
-        # OpenAI/codex candidates remain. Anthropic candidates, model pairs, fallback
-        # routes, the anthropic streaming-shadow surface, and the anthropic text-size
-        # eligibility caps (incl. the 128k tool-result cap) were removed as dead code.
         "providers": ["openai"],
         "source_surfaces": ["openai_responses", "openai_chat", "codex_turn"],
         "streaming_shadow_source_surfaces": [],
@@ -159,126 +169,8 @@ def _default_experiment_policy() -> dict[str, Any]:
             {"requested_model": "gpt-5-codex", "routed_model": "gpt-5-mini"},
             {"requested_model": "gpt-5.3", "routed_model": "gpt-5-mini"},
         ],
-        "model_pairs": [
-            {"requested_model": "gpt-5.6-sol", "routed_model": "gpt-5.6-terra"},
-            {"requested_model": "gpt-5.6-terra", "routed_model": "gpt-5.6-luna"},
-            {"requested_model": "gpt-5.6-luna", "routed_model": "gpt-5-mini"},
-            {"requested_model": "gpt-5.6", "routed_model": "gpt-5.6-terra"},
-            {"requested_model": "gpt-5.5", "routed_model": "gpt-5.6-terra"},
-            {"requested_model": "gpt-5.4", "routed_model": "gpt-5.6-luna"},
-            {"requested_model": "gpt-5.3-codex", "routed_model": "gpt-5-codex"},
-            {"requested_model": "gpt-5-codex", "routed_model": "gpt-5-mini"},
-            {"requested_model": "gpt-5.3", "routed_model": "gpt-5-mini"},
-        ],
-        "routing_candidates": [
-            {
-                "candidate_id": "codex-gpt56-to-terra-summary",
-                "requested_model": "gpt-5.6",
-                "routed_model": "gpt-5.6-terra",
-                "provider": "openai",
-                "source_surface": "codex_turn",
-                "app_family": "codex",
-                "category": "codex-turn",
-                "workflow_phase": "summary",
-                "max_text_chars": 8000,
-                "sample_weight": 4.0,
-            },
-            {
-                "candidate_id": "codex-gpt56-to-terra-unknown-phase",
-                "requested_model": "gpt-5.6",
-                "routed_model": "gpt-5.6-terra",
-                "provider": "openai",
-                "source_surface": "codex_turn",
-                "app_family": "codex",
-                "category": "codex-turn",
-                "workflow_phase": "unknown",
-                "max_text_chars": 8000,
-            },
-            {
-                "candidate_id": "codex-gpt53-codex-to-gpt5-codex-summary",
-                "requested_model": "gpt-5.3-codex",
-                "routed_model": "gpt-5-codex",
-                "provider": "openai",
-                "source_surface": "codex_turn",
-                "app_family": "codex",
-                "category": "codex-turn",
-                "workflow_phase": "summary",
-                "max_text_chars": 8000,
-            },
-            {
-                "candidate_id": "codex-gpt5-codex-to-mini-short-summary",
-                "requested_model": "gpt-5-codex",
-                "routed_model": "gpt-5-mini",
-                "provider": "openai",
-                "source_surface": "codex_turn",
-                "app_family": "codex",
-                "category": "codex-turn",
-                "workflow_phase": "summary",
-                "max_text_chars": 2000,
-                "sample_rate": 0.05,
-            },
-            {
-                "candidate_id": "generic-gpt56-sol-to-terra-chat",
-                "requested_model": "gpt-5.6-sol",
-                "routed_model": "gpt-5.6-terra",
-                "provider": "openai",
-                "source_surface": "openai_responses",
-                "app_family": "generic_openai",
-                "category": "chat",
-                "max_text_chars": 8000,
-                "sample_weight": 4.0,
-            },
-            {
-                "candidate_id": "generic-gpt56-terra-to-luna-chat",
-                "requested_model": "gpt-5.6-terra",
-                "routed_model": "gpt-5.6-luna",
-                "provider": "openai",
-                "source_surface": "openai_responses",
-                "app_family": "generic_openai",
-                "category": "chat",
-                "max_text_chars": 8000,
-            },
-            {
-                "candidate_id": "generic-gpt56-luna-to-mini-short",
-                "requested_model": "gpt-5.6-luna",
-                "routed_model": "gpt-5-mini",
-                "provider": "openai",
-                "source_surface": "openai_responses",
-                "app_family": "generic_openai",
-                "category": "short-completion",
-                "max_text_chars": 4000,
-            },
-            {
-                "candidate_id": "generic-gpt55-to-terra-chat",
-                "requested_model": "gpt-5.5",
-                "routed_model": "gpt-5.6-terra",
-                "provider": "openai",
-                "source_surface": "openai_responses",
-                "app_family": "generic_openai",
-                "category": "chat",
-                "max_text_chars": 8000,
-            },
-            {
-                "candidate_id": "generic-gpt54-to-luna-chat",
-                "requested_model": "gpt-5.4",
-                "routed_model": "gpt-5.6-luna",
-                "provider": "openai",
-                "source_surface": "openai_responses",
-                "app_family": "generic_openai",
-                "category": "chat",
-                "max_text_chars": 8000,
-            },
-            {
-                "candidate_id": "generic-gpt53-to-mini-short",
-                "requested_model": "gpt-5.3",
-                "routed_model": "gpt-5-mini",
-                "provider": "openai",
-                "source_surface": "openai_responses",
-                "app_family": "generic_openai",
-                "category": "short-completion",
-                "max_text_chars": 4000,
-            },
-        ],
+        "model_pairs": [],
+        "routing_candidates": [],
         "workflow_phases": [],
         "categories": ["chat", "short-completion", "tool-light", "tool-result", "tool-heavy", "codex-turn"],
         "similarity_threshold": 0.86,
@@ -1272,9 +1164,15 @@ def _candidate_matches(
     text_chars: int,
     input_tokens: int,
 ) -> bool:
-    if str(candidate.get("requested_model") or "") != requested:
+    pattern = str(candidate.get("requested_model") or "")
+    if "*" in pattern:
+        # Server-issued candidates scope the requested model as a glob
+        # (e.g. "gpt-5*", "claude-opus-4.*"); local candidates stay exact.
+        if not fnmatch.fnmatchcase(requested, pattern):
+            return False
+    elif pattern != requested:
         return False
-    routed = str(candidate.get("routed_model") or "").strip()
+    routed = str(candidate.get("routed_model") or "").strip().rstrip("*").rstrip(".")
     if not routed or routed == requested:
         return False
     exact_fields = {
@@ -1288,6 +1186,11 @@ def _candidate_matches(
         expected = candidate.get(key)
         if expected not in (None, "") and str(expected) != str(actual):
             return False
+    excluded_categories = candidate.get("excluded_categories")
+    if isinstance(excluded_categories, list) and category and category in {
+        str(item) for item in excluded_categories
+    }:
+        return False
     if "stream" in candidate and bool(candidate.get("stream")) != bool(stream):
         return False
     min_text = _as_non_negative_int(candidate.get("min_text_chars"))
@@ -1315,11 +1218,12 @@ def _eligible_routing_candidates(
     stream: bool,
     text_chars: int,
     input_tokens: int,
+    candidates: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     app_family = _app_family(provider, source_surface, requested)
     return [
         candidate
-        for candidate in _all_routing_candidates()
+        for candidate in (_all_routing_candidates() if candidates is None else candidates)
         if _candidate_matches(
             candidate,
             requested=requested,
@@ -1480,6 +1384,7 @@ def _route_down_candidate_selection(
     stream: bool,
     text_chars: int,
     input_tokens: int,
+    candidates: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     eligible = _eligible_routing_candidates(
         requested=requested,
@@ -1490,6 +1395,7 @@ def _route_down_candidate_selection(
         stream=stream,
         text_chars=text_chars,
         input_tokens=input_tokens,
+        candidates=candidates,
     )
     basis = _candidate_selector_basis(
         requested=requested,
@@ -1502,7 +1408,10 @@ def _route_down_candidate_selection(
         input_tokens=input_tokens,
     )
     selected, selector = _select_weighted_candidate(eligible, selector_basis=basis)
-    policy_shape = "routing_candidates" if ROUTING_EXPERIMENT_POLICY.get("routing_candidates") else "model_pairs"
+    if candidates is not None:
+        policy_shape = "server-issued-candidates"
+    else:
+        policy_shape = "routing_candidates" if ROUTING_EXPERIMENT_POLICY.get("routing_candidates") else "model_pairs"
     return {
         "selected": selected,
         "eligible_candidate_count": len(eligible),
@@ -1755,6 +1664,198 @@ def _value_allowed(value: str, configured: Any) -> bool:
     return not values or value in values
 
 
+def _server_url_is_loopback(server_url: str) -> bool:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(str(server_url or ""))
+    if parsed.scheme != "http":
+        return False
+    return (parsed.hostname or "").lower() in {"127.0.0.1", "localhost", "::1"}
+
+
+def _server_policy_candidates_as_local(policy: dict[str, Any]) -> list[dict[str, Any]]:
+    """Flatten server-issued candidates into the local matcher shape.
+
+    The server scopes ``requested_model`` as a glob and nests eligibility;
+    ``routed_model`` is normalized to a concrete model id (defensive strip of
+    a trailing glob) because it is what the shadow executor will call.
+    """
+    adapted: list[dict[str, Any]] = []
+    for candidate in policy.get("candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        eligibility = candidate.get("eligibility") if isinstance(candidate.get("eligibility"), dict) else {}
+        routed = str(candidate.get("routed_model") or "").strip().rstrip("*").rstrip(".")
+        if not routed:
+            continue
+        item: dict[str, Any] = {
+            "candidate_id": str(candidate.get("candidate_id") or ""),
+            "requested_model": str(candidate.get("requested_model") or ""),
+            "routed_model": routed,
+            "provider": candidate.get("provider"),
+            "source_surface": candidate.get("source_surface"),
+            "app_family": candidate.get("app_family"),
+            "candidate_source": "server-issued-routing-experiment-policy",
+        }
+        if candidate.get("category"):
+            item["category"] = candidate.get("category")
+        if isinstance(eligibility.get("excluded_categories"), list):
+            item["excluded_categories"] = list(eligibility["excluded_categories"])
+        for src_key, dst_key in (
+            ("min_text_chars", "min_text_chars"),
+            ("max_text_chars", "max_text_chars"),
+            ("min_input_tokens", "min_input_tokens"),
+            ("max_input_tokens", "max_input_tokens"),
+        ):
+            if eligibility.get(src_key) is not None:
+                item[dst_key] = eligibility.get(src_key)
+        if "stream" in eligibility and eligibility.get("stream") is not None:
+            item["stream"] = bool(eligibility.get("stream"))
+        for key in ("sample_rate", "sample_weight", "daily_budget_usd"):
+            if candidate.get(key) is not None:
+                item[key] = candidate.get(key)
+        adapted.append(item)
+    return adapted
+
+
+def _resolve_server_experiment_policy(
+    *, provider: str, source_surface: str, app_family: str
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Return the authoritative server-issued experiment policy, if any.
+
+    A cached, unexpired policy is authoritative only when its HMAC signature
+    verified locally — or, mirroring the loopback-unauthenticated-dev auth
+    rule, when the managed server is loopback. Anything else is treated as
+    unbacked (the backed-or-off rule) with an explicit reason.
+    """
+    meta: dict[str, Any] = {
+        "schema": "tokenclaw.server_experiment_policy_use.v1",
+        "active": False,
+        "reason": "no-cached-policy",
+        "metadata_only": True,
+    }
+    policy = get_cached_routing_experiment_policy(
+        provider=provider, source_surface=source_surface, app_family=app_family
+    )
+    if policy is None:
+        return None, meta
+    verification = policy.get("signature_verification") if isinstance(policy.get("signature_verification"), dict) else {}
+    verified = verification.get("verified") is True
+    meta.update({
+        "policy_id": policy.get("policy_id"),
+        "expires_at": policy.get("expires_at"),
+        "signature_verified": bool(verified),
+    })
+    if not verified:
+        from tokenclaw.recommendations import recommendation_server_url
+
+        if not _server_url_is_loopback(recommendation_server_url()):
+            meta["reason"] = f"signature-unverified:{verification.get('reason') or 'unknown'}"
+            return None, meta
+        meta["reason"] = "loopback-unverified-signature-accepted"
+    else:
+        meta["reason"] = "signature-verified"
+    meta["active"] = True
+    return policy, meta
+
+
+def _evaluate_server_safety_stops(
+    policy: dict[str, Any], *, budget_spent_usd: float
+) -> dict[str, Any]:
+    """Enforce server-expressed safety stops with locally available metrics.
+
+    Only ``spend_usd`` can be evaluated in the decision hot path today (daily
+    shadow spend is already tracked); other metrics are recorded as expressed
+    but not locally evaluated rather than silently ignored.
+    """
+    tripped: dict[str, Any] | None = None
+    expressed: list[dict[str, Any]] = []
+    for stop in policy.get("safety_stops") or []:
+        if not isinstance(stop, dict):
+            continue
+        entry = {
+            "stop_id": stop.get("stop_id"),
+            "metric": stop.get("metric"),
+            "threshold": stop.get("threshold"),
+            "comparator": stop.get("comparator"),
+            "action": stop.get("action"),
+            "reason_code": stop.get("reason_code"),
+            "locally_evaluated": False,
+        }
+        if stop.get("metric") == "spend_usd":
+            entry["locally_evaluated"] = True
+            threshold = float(stop.get("threshold") or 0.0)
+            comparator = str(stop.get("comparator") or "gte")
+            hit = budget_spent_usd >= threshold if comparator == "gte" else budget_spent_usd <= threshold
+            if hit and tripped is None:
+                tripped = entry
+        expressed.append(entry)
+    return {
+        "expressed": expressed,
+        "tripped": tripped is not None,
+        "tripped_stop": tripped,
+        "reason_code": (tripped or {}).get("reason_code"),
+    }
+
+
+async def prefetch_server_experiment_policy(
+    *, provider: str, source_surface: str, app_family: str
+) -> dict[str, Any]:
+    """Keep the server-issued experiment-policy cache warm from the proxies.
+
+    Called from the async request handlers before routing_experiment_decision
+    (which is synchronous and only reads the cache). Cache-first with a
+    negative-cache backoff, so a healthy server costs one fetch per TTL and a
+    down server one timeout per backoff window. Never raises.
+    """
+    # Imported lazily: recommendations imports from this module at load time.
+    from tokenclaw.managed_mode import managed_product_mode
+    from tokenclaw.recommendations import (
+        _managed_headers,
+        managed_auth_configured,
+        managed_auth_source,
+        recommendation_server_url,
+        recommendation_timeout_seconds,
+        recommendations_enabled,
+    )
+
+    try:
+        product_mode = managed_product_mode()
+        enabled = (
+            recommendations_enabled()
+            and bool(product_mode.family_enabled.get("routing"))
+        )
+        server_url = recommendation_server_url()
+        request = RoutingExperimentPolicyRequest(
+            provider=provider, source_surface=source_surface, app_family=app_family
+        )
+        client = RoutingExperimentPolicyClient(
+            base_url=server_url,
+            headers=_managed_headers(),
+            timeout_seconds=recommendation_timeout_seconds(),
+        )
+        meta = await fetch_or_get_routing_experiment_policy(
+            request,
+            enabled=enabled,
+            server_url=server_url,
+            auth_configured=managed_auth_configured(),
+            auth_source=managed_auth_source(),
+            client=client,
+        )
+        # The full policy body stays in the client cache; the returned meta is
+        # observability that lands in per-call routing_json, so keep it slim.
+        meta.pop("policy", None)
+        return meta
+    except Exception as exc:  # pragma: no cover - defensive: never block forwarding
+        return {
+            "schema": "tokenclaw.routing_experiment_policy_meta.v1",
+            "status": "error",
+            "reason": "prefetch-error",
+            "error": repr(exc)[:200],
+            "active": False,
+        }
+
+
 def routing_experiment_decision(
     body: dict[str, Any],
     routing_meta: dict[str, Any],
@@ -1794,6 +1895,28 @@ def routing_experiment_decision(
         workflow_phase=workflow_phase,
         stream=stream,
     )
+    # Decision precedence (design note): server plan -> local guardrail -> off.
+    # When a signed, unexpired server-issued policy is cached, it is
+    # authoritative for sampling/eligibility; the local YAML keeps veto power
+    # (kill_switch, blocklist, budget as a hard cap via min()).
+    app_family = _app_family(provider, source_surface, requested)
+    server_policy, server_policy_use = _resolve_server_experiment_policy(
+        provider=provider, source_surface=source_surface, app_family=app_family
+    )
+    server_backed = server_policy is not None
+    server_controls = (server_policy or {}).get("controls") or {}
+    if server_backed:
+        controls = dict(controls)
+        controls["sample_rate"] = float(server_controls.get("sample_rate") or 0.0)
+        controls["sample_rate_scope"] = "server-issued"
+        controls["min_text_chars"] = int(server_controls.get("min_text_chars") or 0)
+        controls["min_text_chars_scope"] = "server-issued"
+        controls["max_text_chars"] = int(server_controls.get("max_text_chars") or 0)
+        controls["max_text_chars_scope"] = "server-issued"
+        local_budget_cap = float(controls["daily_budget_usd"])
+        server_budget = float(server_controls.get("daily_budget_usd") or 0.0)
+        controls["daily_budget_usd"] = min(local_budget_cap, server_budget)
+        controls["daily_budget_scope"] = "server-issued-capped-by-local"
     budget_limit = float(controls["daily_budget_usd"])
     budget_filter = controls.get("budget_filter") or {"provider": provider, "source_surface": source_surface}
     budget_spent = _today_shadow_spend_usd(
@@ -1814,7 +1937,12 @@ def routing_experiment_decision(
         "reason": "disabled",
         "counterfactual": False,
         "shadow_only": False,
-        "policy_source": ROUTING_EXPERIMENT_POLICY_SOURCE,
+        "policy_source": (
+            f"managed-issued:{server_policy_use.get('policy_id')}"
+            if server_backed
+            else ROUTING_EXPERIMENT_POLICY_SOURCE
+        ),
+        "server_experiment_policy": server_policy_use,
         "rule_path": ROUTING_EXPERIMENT_RULES_PATH,
         "sample_rate": round(float(controls["sample_rate"]), 6),
         "sample_rate_scope": controls["sample_rate_scope"],
@@ -1883,17 +2011,27 @@ def routing_experiment_decision(
     # is evidence-collection scaffolding, not a license to mint canaries. Canaries are
     # a server responsibility (ARCHITECTURE.md "canary-driven routing lives in
     # tokenclaw_server"); when the server is unavailable or not backing this call there
-    # is no point running a canary, so there is no local fallback. Stay off for any
-    # local-originated policy source unless the server explicitly forced this shadow
-    # (forced_openai_canary_shadow is itself a server signal). Server-directed anthropic
-    # shadows arrive via _managed_shadow_experiment_decision and bypass this path.
+    # is no point running a canary, so there is no local fallback. Backing is either a
+    # cached server-issued experiment policy (the standing candidate matrix), a
+    # server-forced per-request shadow (forced_openai_canary_shadow), or a
+    # non-local policy source. Server-directed anthropic shadows arrive via
+    # _managed_shadow_experiment_decision and bypass this path.
     if (
         str(ROUTING_EXPERIMENT_POLICY_SOURCE).startswith("local-")
         and not forced_openai_canary_shadow
+        and not server_backed
     ):
         meta["reason"] = "no-backed-routing"
         meta["backing_reason"] = "local-policy-without-managed-backing"
         return meta
+    if server_backed and server_controls.get("enabled") is False:
+        meta["reason"] = "server-policy-disabled"
+        return meta
+    if server_backed and bool(server_controls.get("kill_switch")):
+        # The server can stop its own experiments; the local kill switch below
+        # still wins independently.
+        meta["kill_switch"] = True
+        meta["kill_switch_source"] = "server-issued"
     if meta["kill_switch"]:
         meta["reason"] = "kill-switch"
         return meta
@@ -1945,7 +2083,9 @@ def routing_experiment_decision(
             else:
                 meta["reason"] = "managed-shadow-target-missing"
                 return meta
-        elif provider == "openai":
+        elif provider == "openai" and not server_backed:
+            # Without a standing server-issued matrix, OpenAI shadows only run
+            # when the server forces one per request.
             meta["reason"] = "openai-shadow-requires-managed-target"
             if openai_canary.get("status") == "applied":
                 meta["retired_local_trigger"] = "openai-local-routing-canary"
@@ -1960,6 +2100,11 @@ def routing_experiment_decision(
                 stream=stream,
                 text_chars=text_chars,
                 input_tokens=input_tokens,
+                candidates=(
+                    _server_policy_candidates_as_local(server_policy)
+                    if server_backed
+                    else None
+                ),
             )
             selected_candidate = selection["selected"]
             candidate = str((selected_candidate or {}).get("routed_model") or "").strip() or None
@@ -1968,7 +2113,10 @@ def routing_experiment_decision(
             meta["candidate_selector"] = selection["candidate_selector"]
             meta["candidate_selector_basis"] = selection["candidate_selector_basis"]
             meta["candidate_policy_shape"] = selection["candidate_policy_shape"]
-            if selected_candidate is None:
+            if selected_candidate is None and not server_backed:
+                # Thin deterministic fallback only applies in the unbacked
+                # world; a backed server matrix that matched nothing means the
+                # server chose not to shadow this shape.
                 selected_candidate = _thin_candidate_for_requested(
                     requested,
                     provider=provider,
@@ -2014,7 +2162,9 @@ def routing_experiment_decision(
                     meta["blocklist_match"] = blocked
                     meta["blocked_routed_model"] = fallback_block_target
                     return meta
-            meta["reason"] = "model-pair-not-enabled"
+            meta["reason"] = (
+                "server-policy-no-eligible-candidate" if server_backed else "model-pair-not-enabled"
+            )
             return meta
         if selected_candidate is not None:
             meta["candidate_id"] = selected_candidate.get("candidate_id")
@@ -2093,6 +2243,14 @@ def routing_experiment_decision(
     if workflow_phases and workflow_phase not in workflow_phases:
         meta["reason"] = "workflow-phase-not-enabled"
         return meta
+    if server_backed:
+        # Server-expressed safety stops, locally enforced where the metric is
+        # locally available (spend today; error/retry rates need aggregation).
+        safety = _evaluate_server_safety_stops(server_policy, budget_spent_usd=budget_spent)
+        meta["server_safety_stops"] = safety
+        if safety["tripped"] and not force_shadow:
+            meta["reason"] = str(safety.get("reason_code") or "server-safety-stop")
+            return meta
     if budget_limit <= 0 and not force_shadow:
         meta["reason"] = "daily-budget-zero"
         return meta
