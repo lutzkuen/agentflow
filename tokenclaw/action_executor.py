@@ -109,7 +109,7 @@ def _supported_target_model(provider: str, target_model: str) -> bool:
         return False
     target_l = target_model.lower()
     if provider == "anthropic":
-        return any(tier in target_l for tier in ("haiku", "sonnet", "opus"))
+        return any(tier in target_l for tier in ("haiku", "sonnet", "opus", "fable", "mythos"))
     return bool(target_l)
 
 
@@ -515,6 +515,18 @@ class ActionExecutor:
                     "apply_reason": "provider-mismatch",
                     "veto_reason": "provider-mismatch",
                 })
+            elif target_model == current_model:
+                # A noop target (server echoing the current model, e.g. a
+                # baseline pass-through decision) is not a veto — checking the
+                # support allowlist first mislabeled every request for a model
+                # the allowlist lags behind (claude-fable-5) as
+                # "unsupported-target-model".
+                result["routing"].update({
+                    "status": "noop",
+                    "applied": False,
+                    "target_model": target_model,
+                    "apply_reason": "target-model-already-selected-locally",
+                })
             elif not _supported_target_model(self.provider, target_model):
                 result["routing"].update({
                     "status": "vetoed",
@@ -522,13 +534,6 @@ class ActionExecutor:
                     "target_model": target_model,
                     "apply_reason": "unsupported-target-model",
                     "veto_reason": "unsupported-target-model",
-                })
-            elif target_model == current_model:
-                result["routing"].update({
-                    "status": "noop",
-                    "applied": False,
-                    "target_model": target_model,
-                    "apply_reason": "target-model-already-selected-locally",
                 })
             else:
                 body["model"] = target_model
