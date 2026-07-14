@@ -14,7 +14,7 @@ from tokenclaw.store import Store, stable_json
 class FailingManagedFeedbackClient:
     calls = []
 
-    def __init__(self, *, timeout=None):
+    def __init__(self, *, timeout=None, **kwargs):
         self.timeout = timeout
 
     async def __aenter__(self):
@@ -193,7 +193,9 @@ class PhaseRoutingReportTests(unittest.TestCase):
         [row] = result["opportunities"]
         self.assertEqual(row["phase"], "summary")
         self.assertEqual(row["model_pair"], "opus_to_sonnet")
-        self.assertEqual(row["target_model"], "claude-sonnet-4-6")
+        # SONNET_DEFAULT is claude-sonnet-5 since 771dfab retargeted the
+        # opus->sonnet downgrade.
+        self.assertEqual(row["target_model"], "claude-sonnet-5")
 
     def test_dry_run_simulates_local_yaml_rule_without_writes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -402,7 +404,7 @@ rules:
                 },
                 clear=False,
             ):
-                with patch("tokenclaw.recommendations.httpx.AsyncClient", FailingManagedFeedbackClient):
+                with patch("tokenclaw.http_client.httpx.AsyncClient", FailingManagedFeedbackClient):
                     code = cli.phase_routing_report_cli(
                         [
                             "--db",

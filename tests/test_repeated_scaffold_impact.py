@@ -30,7 +30,7 @@ class RepeatedScaffoldFeedbackClient:
     status_code = 200
     text = '{"ok":true}'
 
-    def __init__(self, *, timeout=None):
+    def __init__(self, *, timeout=None, **kwargs):
         self.timeout = timeout
 
     async def __aenter__(self):
@@ -680,7 +680,7 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
         )
 
         output = io.StringIO()
-        with patch("tokenclaw.recommendations.httpx.AsyncClient", RepeatedScaffoldFeedbackClient):
+        with patch("tokenclaw.http_client.httpx.AsyncClient", RepeatedScaffoldFeedbackClient):
             exit_code = cli.repeated_scaffold_impact_cli(
                 ["--db", self.db_path, "--limit", "20", "--flush-feedback", "--feedback-limit", "10"],
                 stdout=output,
@@ -735,7 +735,7 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
         self._log_call(cohort="canary_holdout", tokens_saved=0)
 
         output = io.StringIO()
-        with patch("tokenclaw.recommendations.httpx.AsyncClient", RepeatedScaffoldFeedbackClient):
+        with patch("tokenclaw.http_client.httpx.AsyncClient", RepeatedScaffoldFeedbackClient):
             exit_code = cli.repeated_scaffold_impact_cli(
                 ["--db", self.db_path, "--limit", "20", "--feedback-dry-run"],
                 stdout=output,

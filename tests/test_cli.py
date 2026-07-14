@@ -29,7 +29,7 @@ class ManagedFeedbackFlushClient:
     text = '{"ok":true}'
     headers = {}
 
-    def __init__(self, *, timeout=None):
+    def __init__(self, *, timeout=None, **kwargs):
         self.timeout = timeout
 
     async def __aenter__(self):
@@ -51,7 +51,7 @@ class ManagedReadinessContractClient:
     calls = []
     contract_body = {}
 
-    def __init__(self, *, timeout=None):
+    def __init__(self, *, timeout=None, **kwargs):
         self.timeout = timeout
 
     async def __aenter__(self):
@@ -217,7 +217,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
         readme = Path("README.md").read_text(encoding="utf-8")
         boundary_note = Path("docs/client-server-boundary.md").read_text(encoding="utf-8")
 
-        self.assertLess(readme.index("## Quick start"), readme.index("## Manual proxy fallback"))
+        self.assertLess(readme.index("## Run as a local proxy"), readme.index("## Manual proxy fallback"))
         self.assertLess(readme.index("tokenclaw activate openai"), readme.index("tokenclaw internal proxy"))
         for expected in (
             "tokenclaw activate openai",
@@ -242,7 +242,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             "unsupported: GitHub Copilot is not a base-url target",
             "pip install tokenclaw",
             "For TokenClaw development",
-            "pip install -e .",
+            "pip install -e '.[server]'",
             "tokenclaw --help",
             "tokenclaw start",
             "tokenclaw internal --list",
@@ -5138,7 +5138,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.http_client.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.optimization_promotion_canary_apply_cli(
                         ["--config-dir", tmp, "--db", db_path, "--write", "-"],
                         stdin=io.StringIO(json.dumps(bundle)),
@@ -5206,7 +5206,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.http_client.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.optimization_promotion_canary_apply_cli(
                         ["--config-dir", tmp, "--db", db_path, "--dry-run", "-"],
                         stdin=io.StringIO(json.dumps(bundle)),
@@ -5436,7 +5436,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.http_client.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.optimization_promotion_impact_cli(
                         ["--db", db_path, "--limit", "10", "--min-applied-samples", "1", "--min-holdout-samples", "1", "--max-evidence-age-hours", "999999", "-"],
                         stdin=io.StringIO(json.dumps(bundle)),
@@ -6305,7 +6305,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.http_client.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.old_context_summary_dry_run_cli(
                         ["-", "--db", db_path, "--limit", "10"],
                         stdin=io.StringIO(json.dumps(proposed)),
@@ -6784,7 +6784,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.http_client.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.old_context_summary_impact_cli(
                         ["-", "--db", db_path, "--limit", "10"],
                         stdin=io.StringIO(json.dumps(dry_run)),
@@ -6834,7 +6834,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.http_client.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.old_context_summary_impact_cli(
                         ["-", "--db", db_path, "--limit", "10"],
                         stdin=io.StringIO(json.dumps(dry_run)),
@@ -6945,7 +6945,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.http_client.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.old_context_summary_quality_gate_cli(
                         ["-", "--db", db_path, "--limit", "10"],
                         stdin=io.StringIO(json.dumps(dry_run)),
@@ -8403,7 +8403,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.http_client.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.managed_rollout_actions_apply_cli(
                         ["--config-dir", tmp, "--db", db_path, "--dry-run", "-"],
                         stdin=io.StringIO(json.dumps(bundle)),
@@ -8472,7 +8472,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.http_client.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.managed_rollout_actions_review_cli(
                         ["--config-dir", tmp, "--db", db_path, "-"],
                         stdin=io.StringIO(json.dumps(bundle)),
@@ -8685,7 +8685,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.http_client.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.managed_rollout_actions_apply_cli(
                         ["--config-dir", tmp, "--db", db_path, "-"],
                         stdin=io.StringIO(json.dumps(bundle)),
@@ -8737,7 +8737,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.http_client.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.managed_rollout_actions_apply_cli(
                         ["--config-dir", tmp, "--db", db_path, "--dry-run", "-"],
                         stdin=io.StringIO(json.dumps(bundle)),
@@ -12152,7 +12152,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
                 store.conn.close()
 
             stdout = io.StringIO()
-            with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+            with patch("tokenclaw.http_client.httpx.AsyncClient", ManagedFeedbackFlushClient):
                 code = cli.managed_feedback_flush_cli(
                     ["--db", db_path, "--source-surface", "codex_turn", "--dry-run"],
                     stdout=stdout,
@@ -12195,7 +12195,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.http_client.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.managed_feedback_flush_cli(
                         ["--db", db_path, "--source-surface", "codex_turn", "--limit", "1"],
                         stdout=stdout,
@@ -12248,7 +12248,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.http_client.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.managed_feedback_flush_cli(["--db", db_path], stdout=stdout)
 
             store = Store(db_path)
@@ -12286,7 +12286,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.http_client.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.managed_feedback_flush_cli(
                         ["--db", db_path, "--activation", "--limit", "5"],
                         stdout=stdout,
@@ -12347,7 +12347,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.http_client.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.managed_feedback_flush_cli(
                         [
                             "--db", db_path,
@@ -12411,7 +12411,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.http_client.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.managed_feedback_flush_cli(
                         ["--db", db_path, "--activation", "--limit", "5", "--max-age-seconds", "1"],
                         stdout=stdout,
@@ -12467,7 +12467,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.http_client.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.managed_feedback_flush_cli(
                         ["--db", db_path, "--activation", "--limit", "1", "--max-age-seconds", "0"],
                         stdout=stdout,
@@ -12520,7 +12520,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
                     clear=False,
                 ):
                     with patch.object(server, "store", store):
-                        with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                        with patch("tokenclaw.http_client.httpx.AsyncClient", ManagedFeedbackFlushClient):
                             results = asyncio.run(
                                 server._drain_managed_outcome_feedback_once(
                                     limit=10,
@@ -12582,7 +12582,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.http_client.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.managed_feedback_flush_cli(
                         ["--db", db_path, "--post-promotion-action-outcomes", "--limit", "5"],
                         stdout=stdout,
@@ -12649,7 +12649,7 @@ class ManagedFeedbackCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                with patch("tokenclaw.http_client.httpx.AsyncClient", ManagedFeedbackFlushClient):
                     code = cli.managed_feedback_flush_cli(
                         ["--db", db_path, "--post-promotion-action-outcomes", "--limit", "5"],
                         stdout=stdout,

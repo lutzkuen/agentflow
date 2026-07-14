@@ -27,7 +27,7 @@ class FakeResponse:
 class FakeManagedServerClient:
     calls = []
 
-    def __init__(self, timeout):
+    def __init__(self, timeout, **kwargs):
         self.timeout = timeout
 
     async def __aenter__(self):
@@ -266,7 +266,7 @@ class PushManagedActivationProofTests(unittest.TestCase):
                 return {"status": "stored"}
 
         class FakeClient:
-            def __init__(self, timeout=None):
+            def __init__(self, timeout=None, **kwargs):
                 captured["timeout"] = timeout
 
             async def __aenter__(self):

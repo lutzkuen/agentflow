@@ -516,19 +516,22 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         session_payload = session_tier_call["json"]
         self.assertEqual(session_tier_call["url"], "http://127.0.0.1:4100/v1/session-tier")
         self.assertNotIn("authorization", session_tier_call["headers"])
-        self.assertEqual(session_payload["schema"], "tokenclaw.session_tier_request.v1")
+        self.assertEqual(session_payload["schema"], "agentflow.session_tier_request.v1")
         self.assertEqual(session_payload["source_surface"], "anthropic_messages")
         self.assertEqual(session_payload["app_family"], "claude_code")
         self.assertEqual(session_payload["requested_model"], "claude-haiku-4-5-20251001")
         self.assertIn("session_id_hash", session_payload["grouping_identifiers"])
         self.assertTrue(session_payload["grouping_identifiers"]["session_id_hash"].startswith("sha256:"))
-        self.assertTrue(session_payload["privacy_summary"]["metadata_only"])
-        self.assertFalse(session_payload["privacy_summary"]["raw_body_storage"])
+        # The wire payload is contract-exact (extra fields 422 server-side), so
+        # privacy is asserted by shape: hashed grouping ids and no raw content.
+        self.assertNotIn("privacy_summary", session_payload)
         self.assertNotIn("session-tier-secret", str(session_payload))
         self.assertNotIn("raw prompt secret", str(session_payload))
         self.assertTrue({"messages", "content", "raw_request", "prompt"}.isdisjoint(self._keys_in(session_payload)))
         self.assertEqual(ManagedFeedbackAsyncClient.calls[1]["json"]["model"], "claude-haiku-4-5-20251001")
-        self.assertEqual(ManagedFeedbackAsyncClient.calls[2]["json"]["model"], "claude-sonnet-4-6")
+        # Sonnet-tier application resolves to SONNET_DEFAULT (claude-sonnet-5
+        # since 771dfab retargeted the opus->sonnet downgrade).
+        self.assertEqual(ManagedFeedbackAsyncClient.calls[2]["json"]["model"], "claude-sonnet-5")
 
         rows = server.store.conn.execute("select routing_json from calls").fetchall()
         self.assertEqual(len(rows), 2)
@@ -870,6 +873,8 @@ class SafetyRegressionRouteTests(unittest.TestCase):
 
         patches = [
             patch.object(routing_experiments, "ROUTING_EXPERIMENT_ENABLED", True),
+            # Server-backed policy source: the backed-or-off gate blocks local- sources.
+            patch.object(routing_experiments, "ROUTING_EXPERIMENT_POLICY_SOURCE", "managed-test-bundle"),
             patch.object(routing_experiments, "ROUTING_EXPERIMENT_MODE", "applied_routed_down"),
             patch.object(routing_experiments, "ROUTING_EXPERIMENT_SAMPLE_RATE", 1.0),
             patch.object(routing_experiments, "ROUTING_EXPERIMENT_DAILY_BUDGET_USD", 0.05),
@@ -950,6 +955,8 @@ class SafetyRegressionRouteTests(unittest.TestCase):
 
         patches = [
             patch.object(routing_experiments, "ROUTING_EXPERIMENT_ENABLED", True),
+            # Server-backed policy source: the backed-or-off gate blocks local- sources.
+            patch.object(routing_experiments, "ROUTING_EXPERIMENT_POLICY_SOURCE", "managed-test-bundle"),
             patch.object(routing_experiments, "ROUTING_EXPERIMENT_MODE", "shadow_candidate_pass_through"),
             patch.object(routing_experiments, "ROUTING_EXPERIMENT_SAMPLE_RATE", 1.0),
             patch.object(routing_experiments, "ROUTING_EXPERIMENT_DAILY_BUDGET_USD", 10.0),
@@ -1048,6 +1055,8 @@ class SafetyRegressionRouteTests(unittest.TestCase):
 
         patches = [
             patch.object(routing_experiments, "ROUTING_EXPERIMENT_ENABLED", True),
+            # Server-backed policy source: the backed-or-off gate blocks local- sources.
+            patch.object(routing_experiments, "ROUTING_EXPERIMENT_POLICY_SOURCE", "managed-test-bundle"),
             patch.object(routing_experiments, "ROUTING_EXPERIMENT_MODE", "shadow_candidate_pass_through"),
             patch.object(routing_experiments, "ROUTING_EXPERIMENT_SAMPLE_RATE", 1.0),
             patch.object(routing_experiments, "ROUTING_EXPERIMENT_DAILY_BUDGET_USD", 10.0),

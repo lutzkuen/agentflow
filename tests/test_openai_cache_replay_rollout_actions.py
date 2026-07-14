@@ -18,7 +18,7 @@ from tokenclaw.openai_cache_replay_rollout_actions import (
 class ManagedFeedbackFlushClient:
     calls = []
 
-    def __init__(self, *, timeout=None):
+    def __init__(self, *, timeout=None, **kwargs):
         self.timeout = timeout
 
     async def __aenter__(self):
@@ -341,7 +341,7 @@ class OpenAICacheReplayRolloutActionsTests(unittest.TestCase):
             db_path = str(Path(tmp) / "tokenclaw.sqlite3")
             signed = self._signed(self._bundle())
             out = io.StringIO()
-            with patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+            with patch("tokenclaw.http_client.httpx.AsyncClient", ManagedFeedbackFlushClient):
                 code = cli.managed_rollout_actions_apply_cli(
                     ["--config-dir", tmp, "--db", db_path, "--dry-run", "-"],
                     stdin=io.StringIO(json.dumps(signed)),

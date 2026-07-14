@@ -36,7 +36,7 @@ class FakeAsyncClient:
     last_timeout = None
     last_headers = None
 
-    def __init__(self, timeout):
+    def __init__(self, timeout, **kwargs):
         self.__class__.last_timeout = timeout
 
     async def __aenter__(self):
@@ -365,7 +365,7 @@ class RecommendationTest(unittest.TestCase):
         os.environ["TOKENCLAW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
         FakeAsyncClient.response = FakeResponse(body={"unexpected": True})
 
-        with patch("tokenclaw.recommendations.httpx.AsyncClient", FakeAsyncClient):
+        with patch("tokenclaw.http_client.httpx.AsyncClient", FakeAsyncClient):
             meta = asyncio.run(recommendations.fetch_policy_decision({"input_features": {}}))
 
         self.assertEqual(meta["status"], "skipped")

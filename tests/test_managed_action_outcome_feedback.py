@@ -28,7 +28,7 @@ class FakeAsyncClient:
     last_url = None
     last_json = None
 
-    def __init__(self, timeout):
+    def __init__(self, timeout, **kwargs):
         self.__class__.last_timeout = timeout
 
     async def __aenter__(self):

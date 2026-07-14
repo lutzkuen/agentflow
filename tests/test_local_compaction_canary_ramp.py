@@ -493,7 +493,7 @@ class LocalCompactionCanaryRampTests(unittest.TestCase):
                         "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
                     },
                     clear=False,
-                ), patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackRampClient):
+                ), patch("tokenclaw.http_client.httpx.AsyncClient", ManagedFeedbackRampClient):
                     result = build_local_compaction_canary_ramp(
                         store,
                         config_dir=config,
@@ -553,7 +553,7 @@ class LocalCompactionCanaryRampTests(unittest.TestCase):
                         "TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS": "3",
                     },
                     clear=False,
-                ), patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackRampClient):
+                ), patch("tokenclaw.http_client.httpx.AsyncClient", ManagedFeedbackRampClient):
                     result = build_local_compaction_canary_ramp(
                         store,
                         config_dir=config,
@@ -601,7 +601,7 @@ class LocalCompactionCanaryRampTests(unittest.TestCase):
                         "TOKENCLAW_RECOMMENDATION_SERVER_URL": "http://managed.test",
                     },
                     clear=False,
-                ), patch("tokenclaw.recommendations.httpx.AsyncClient", ManagedFeedbackRampClient):
+                ), patch("tokenclaw.http_client.httpx.AsyncClient", ManagedFeedbackRampClient):
                     result = build_local_compaction_canary_ramp(
                         store,
                         config_dir=config,

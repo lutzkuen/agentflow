@@ -49,7 +49,10 @@ class InstallSmokeWorkflowTests(unittest.TestCase):
         for expected in (
             "python -m build --wheel",
             "python -m venv .venv-smoke",
-            '"$venv_python" -m pip install dist/*.whl',
+            # Two-phase install since the library split: base wheel first
+            # (server-free), then the [server] extra for the CLI/proxy smoke.
+            '"$venv_python" -m pip install "$wheel"',
+            '"$venv_python" -m pip install "${wheel}[server]"',
             "base wheel unexpectedly requires optional dependency",
             "tokenclaw version",
             "tokenclaw activate claude --dry-run",

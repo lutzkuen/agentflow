@@ -111,6 +111,11 @@ class FakeShadowStreamingClient:
         return FakeStreamResponseForFrames(FakeShadowStreamingClient.frames)
 
     async def post(self, *args, **kwargs):
+        # Managed control-plane calls (session-tier, client-contract) ride the
+        # same patched client; only provider-bound posts count as shadow calls.
+        url = str(args[0]) if args else str(kwargs.get("url") or "")
+        if "127.0.0.1:4100" in url:
+            return FakeShadowStreamingClient.post_response
         FakeShadowStreamingClient.post_calls += 1
         FakeShadowStreamingClient.post_payloads.append(kwargs.get("json"))
         return FakeShadowStreamingClient.post_response

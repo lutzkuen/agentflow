@@ -2895,7 +2895,13 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertFalse(routing["routing_experiment"]["sampled"])
         self.assertFalse(routing["routing_experiment"]["counterfactual"])
         self.assertFalse(routing["routing_experiment"]["shadow_only"])
-        self.assertEqual(routing["routing_experiment"]["reason"], "openai-shadow-requires-managed-target")
+        # A local-originated policy source is gated before the OpenAI-specific
+        # managed-target check: backed or off.
+        self.assertEqual(routing["routing_experiment"]["reason"], "no-backed-routing")
+        self.assertEqual(
+            routing["routing_experiment"]["backing_reason"],
+            "local-policy-without-managed-backing",
+        )
         self.assertNotIn("SECRET_SHADOW_AB", call_row["routing_json"])
         self.assertIsNone(call_row["request_json"])
         self.assertIsNone(call_row["response_json"])
