@@ -144,27 +144,37 @@ def _default_experiment_policy() -> dict[str, Any]:
         "streaming_shadow_source_surfaces": [],
         "blocklist": [],
         "preferred_pathways": [],
+        # Ladder (2026-07): 5.6 tiers step down sol -> terra -> luna; gpt-5-mini
+        # is the deliberate rock bottom (no mini -> nano rung); deprecated 5.5
+        # (price-twin of sol) and 5.4 (price-twin of terra) jump straight to the
+        # cheaper current-generation sibling. Bare "gpt-5.6" serves Sol upstream.
         "fallback_routes": [
-            {"requested_model": "gpt-5.5", "routed_model": "gpt-5.4"},
-            {"requested_model": "gpt-5.4", "routed_model": "gpt-5.3"},
+            {"requested_model": "gpt-5.6-sol", "routed_model": "gpt-5.6-terra"},
+            {"requested_model": "gpt-5.6-terra", "routed_model": "gpt-5.6-luna"},
+            {"requested_model": "gpt-5.6-luna", "routed_model": "gpt-5-mini"},
+            {"requested_model": "gpt-5.6", "routed_model": "gpt-5.6-terra"},
+            {"requested_model": "gpt-5.5", "routed_model": "gpt-5.6-terra"},
+            {"requested_model": "gpt-5.4", "routed_model": "gpt-5.6-luna"},
             {"requested_model": "gpt-5.3-codex", "routed_model": "gpt-5-codex"},
             {"requested_model": "gpt-5-codex", "routed_model": "gpt-5-mini"},
             {"requested_model": "gpt-5.3", "routed_model": "gpt-5-mini"},
-            {"requested_model": "gpt-5-mini", "routed_model": "gpt-5-nano"},
         ],
         "model_pairs": [
-            {"requested_model": "gpt-5.5", "routed_model": "gpt-5.4"},
-            {"requested_model": "gpt-5.4", "routed_model": "gpt-5.4-mini"},
+            {"requested_model": "gpt-5.6-sol", "routed_model": "gpt-5.6-terra"},
+            {"requested_model": "gpt-5.6-terra", "routed_model": "gpt-5.6-luna"},
+            {"requested_model": "gpt-5.6-luna", "routed_model": "gpt-5-mini"},
+            {"requested_model": "gpt-5.6", "routed_model": "gpt-5.6-terra"},
+            {"requested_model": "gpt-5.5", "routed_model": "gpt-5.6-terra"},
+            {"requested_model": "gpt-5.4", "routed_model": "gpt-5.6-luna"},
             {"requested_model": "gpt-5.3-codex", "routed_model": "gpt-5-codex"},
             {"requested_model": "gpt-5-codex", "routed_model": "gpt-5-mini"},
             {"requested_model": "gpt-5.3", "routed_model": "gpt-5-mini"},
-            {"requested_model": "gpt-5-mini", "routed_model": "gpt-5-nano"},
         ],
         "routing_candidates": [
             {
-                "candidate_id": "codex-gpt55-to-gpt53-codex-summary",
-                "requested_model": "gpt-5.5",
-                "routed_model": "gpt-5.3-codex",
+                "candidate_id": "codex-gpt56-to-terra-summary",
+                "requested_model": "gpt-5.6",
+                "routed_model": "gpt-5.6-terra",
                 "provider": "openai",
                 "source_surface": "codex_turn",
                 "app_family": "codex",
@@ -174,9 +184,9 @@ def _default_experiment_policy() -> dict[str, Any]:
                 "sample_weight": 4.0,
             },
             {
-                "candidate_id": "codex-gpt55-to-gpt53-codex-unknown-phase",
-                "requested_model": "gpt-5.5",
-                "routed_model": "gpt-5.3-codex",
+                "candidate_id": "codex-gpt56-to-terra-unknown-phase",
+                "requested_model": "gpt-5.6",
+                "routed_model": "gpt-5.6-terra",
                 "provider": "openai",
                 "source_surface": "codex_turn",
                 "app_family": "codex",
@@ -208,9 +218,9 @@ def _default_experiment_policy() -> dict[str, Any]:
                 "sample_rate": 0.05,
             },
             {
-                "candidate_id": "generic-gpt55-to-gpt54-chat",
-                "requested_model": "gpt-5.5",
-                "routed_model": "gpt-5.4",
+                "candidate_id": "generic-gpt56-sol-to-terra-chat",
+                "requested_model": "gpt-5.6-sol",
+                "routed_model": "gpt-5.6-terra",
                 "provider": "openai",
                 "source_surface": "openai_responses",
                 "app_family": "generic_openai",
@@ -219,20 +229,9 @@ def _default_experiment_policy() -> dict[str, Any]:
                 "sample_weight": 4.0,
             },
             {
-                "candidate_id": "generic-gpt55-to-mini-short-exploratory",
-                "requested_model": "gpt-5.5",
-                "routed_model": "gpt-5-mini",
-                "provider": "openai",
-                "source_surface": "openai_responses",
-                "app_family": "generic_openai",
-                "category": "short-completion",
-                "max_text_chars": 2000,
-                "sample_rate": 0.02,
-            },
-            {
-                "candidate_id": "generic-gpt54-to-gpt53-chat",
-                "requested_model": "gpt-5.4",
-                "routed_model": "gpt-5.3",
+                "candidate_id": "generic-gpt56-terra-to-luna-chat",
+                "requested_model": "gpt-5.6-terra",
+                "routed_model": "gpt-5.6-luna",
                 "provider": "openai",
                 "source_surface": "openai_responses",
                 "app_family": "generic_openai",
@@ -240,13 +239,33 @@ def _default_experiment_policy() -> dict[str, Any]:
                 "max_text_chars": 8000,
             },
             {
-                "candidate_id": "generic-gpt54-to-gpt54-mini-tool-light",
-                "requested_model": "gpt-5.4",
-                "routed_model": "gpt-5.4-mini",
+                "candidate_id": "generic-gpt56-luna-to-mini-short",
+                "requested_model": "gpt-5.6-luna",
+                "routed_model": "gpt-5-mini",
                 "provider": "openai",
                 "source_surface": "openai_responses",
                 "app_family": "generic_openai",
-                "category": "tool-light",
+                "category": "short-completion",
+                "max_text_chars": 4000,
+            },
+            {
+                "candidate_id": "generic-gpt55-to-terra-chat",
+                "requested_model": "gpt-5.5",
+                "routed_model": "gpt-5.6-terra",
+                "provider": "openai",
+                "source_surface": "openai_responses",
+                "app_family": "generic_openai",
+                "category": "chat",
+                "max_text_chars": 8000,
+            },
+            {
+                "candidate_id": "generic-gpt54-to-luna-chat",
+                "requested_model": "gpt-5.4",
+                "routed_model": "gpt-5.6-luna",
+                "provider": "openai",
+                "source_surface": "openai_responses",
+                "app_family": "generic_openai",
+                "category": "chat",
                 "max_text_chars": 8000,
             },
             {
@@ -258,18 +277,6 @@ def _default_experiment_policy() -> dict[str, Any]:
                 "app_family": "generic_openai",
                 "category": "short-completion",
                 "max_text_chars": 4000,
-            },
-            {
-                "candidate_id": "generic-gpt5-mini-to-nano-summary",
-                "requested_model": "gpt-5-mini",
-                "routed_model": "gpt-5-nano",
-                "provider": "openai",
-                "source_surface": "openai_responses",
-                "app_family": "generic_openai",
-                "category": "short-completion",
-                "workflow_phase": "summary",
-                "max_text_chars": 1000,
-                "sample_rate": 0.02,
             },
         ],
         "workflow_phases": [],
@@ -530,18 +537,29 @@ def _suggest_adjacent_routed_model(requested: str) -> str:
         return "claude-sonnet-5"
     if "sonnet" in model_l:
         return "claude-haiku-4-5-20251001"
+    # OpenAI ladder (2026-07): current-generation 5.6 tiers step down in price
+    # (sol -> terra -> luna), gpt-5-mini is the deliberate rock bottom, and
+    # deprecated older generations (5.5 price-twins sol, 5.4 price-twins terra)
+    # jump straight to the cheaper current-generation sibling rather than
+    # walking a dead chain. Bare "gpt-5.6" serves Sol upstream.
+    if "gpt-5.6-sol" in model_l or "gpt-5-6-sol" in model_l:
+        return "gpt-5.6-terra"
+    if "gpt-5.6-terra" in model_l or "gpt-5-6-terra" in model_l:
+        return "gpt-5.6-luna"
+    if "gpt-5.6-luna" in model_l or "gpt-5-6-luna" in model_l:
+        return "gpt-5-mini"
+    if "gpt-5.6" in model_l or "gpt-5-6" in model_l:
+        return "gpt-5.6-terra"
     if "gpt-5.5" in model_l or "gpt-5-5" in model_l:
-        return "gpt-5.4"
+        return "gpt-5.6-terra"
     if "gpt-5.4" in model_l or "gpt-5-4" in model_l:
-        return "gpt-5.3"
+        return "gpt-5.6-luna"
     if "gpt-5.3-codex" in model_l or "gpt-5-3-codex" in model_l:
         return "gpt-5-codex"
     if "gpt-5-codex" in model_l:
         return "gpt-5-mini"
     if "gpt-5.3" in model_l or "gpt-5-3" in model_l:
         return "gpt-5-mini"
-    if "gpt-5-mini" in model_l:
-        return "gpt-5-nano"
     return requested
 
 
@@ -2333,7 +2351,21 @@ def _model_family(model: Any) -> str | None:
     if not model:
         return None
     model_l = str(model).lower()
-    for family in ("haiku", "sonnet", "opus", "fable", "mythos", "codex", "gpt-5", "gpt-4", "gpt-3"):
+    for family in (
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.6",
+        "haiku",
+        "sonnet",
+        "opus",
+        "fable",
+        "mythos",
+        "codex",
+        "gpt-5",
+        "gpt-4",
+        "gpt-3",
+    ):
         if family in model_l:
             return family
     return "other"

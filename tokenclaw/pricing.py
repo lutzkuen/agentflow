@@ -42,6 +42,14 @@ ANTHROPIC_MODEL_PRICES = {
 }
 
 OPENAI_MODEL_PRICES = {
+    # GPT-5.6 generation (GA 2026-07-09). Tiered entries must precede the bare
+    # "gpt-5.6" alias and the older "gpt-5" prefix: _match_prices is
+    # substring-first-match in dict order. The bare alias routes to Sol
+    # upstream and is priced accordingly.
+    "gpt-5.6-sol": (5.0, 30.0, 0.50),
+    "gpt-5.6-terra": (2.50, 15.0, 0.25),
+    "gpt-5.6-luna": (1.0, 6.0, 0.10),
+    "gpt-5.6": (5.0, 30.0, 0.50),
     "gpt-5.5": (5.0, 30.0, 0.50),
     "gpt-5.4-mini": (0.75, 4.50, 0.075),
     "gpt-5.4": (2.50, 15.0, 0.25),
@@ -63,6 +71,13 @@ OPENAI_MODEL_PRICES = {
 }
 
 OPENAI_PRIORITY_MODEL_PRICES = {
+    # Priority-tier 5.6 prices follow the table's established 2.5x-standard
+    # pattern (matches 5.5); confirm against the published priority rate card
+    # when OpenAI documents it for 5.6.
+    "gpt-5.6-sol": (12.50, 75.0, 1.25),
+    "gpt-5.6-terra": (6.25, 37.50, 0.625),
+    "gpt-5.6-luna": (2.50, 15.0, 0.25),
+    "gpt-5.6": (12.50, 75.0, 1.25),
     "gpt-5.5": (12.50, 75.0, 1.25),
     "gpt-5.4-mini": (1.50, 9.0, 0.150),
     "gpt-5.4": (5.0, 30.0, 0.50),

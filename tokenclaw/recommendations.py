@@ -503,7 +503,21 @@ def _model_family(model: str | None) -> str | None:
     if not model:
         return None
     model_l = model.lower()
-    for family in ("haiku", "sonnet", "opus", "fable", "mythos", "codex", "gpt-5", "gpt-4", "gpt-3"):
+    for family in (
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.6",
+        "haiku",
+        "sonnet",
+        "opus",
+        "fable",
+        "mythos",
+        "codex",
+        "gpt-5",
+        "gpt-4",
+        "gpt-3",
+    ):
         if family in model_l:
             return family
     return "other"
