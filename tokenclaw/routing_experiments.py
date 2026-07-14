@@ -2477,6 +2477,10 @@ def compare_response_outputs(primary_response: dict[str, Any] | None, shadow_res
         "shadow_output_chars": len(shadow_text),
         "primary_tool_call_count": len(primary_calls),
         "shadow_tool_call_count": len(shadow_calls),
+        # Truncation observability: a shadow stopped by max_tokens is a
+        # handicapped probe, not model divergence.
+        "primary_stop_reason": (primary_response or {}).get("stop_reason"),
+        "shadow_stop_reason": (shadow_response or {}).get("stop_reason"),
         "primary_output_sha256": sha256_text(primary_signature),
         "shadow_output_sha256": sha256_text(shadow_signature),
         "text_similarity": round(float(text_similarity), 6),
@@ -2695,6 +2699,10 @@ def routing_experiment_feedback_features(
         "prose_similarity": comparison.get("prose_similarity"),
         "functional_similarity": comparison.get("functional_similarity"),
         "relaxed_passed": bool(comparison.get("relaxed_passed")),
+        "primary_stop_reason": comparison.get("primary_stop_reason"),
+        "shadow_stop_reason": comparison.get("shadow_stop_reason"),
+        "primary_tool_call_count": comparison.get("primary_tool_call_count"),
+        "shadow_tool_call_count": comparison.get("shadow_tool_call_count"),
         "similarity_threshold": experiment_meta.get("similarity_threshold"),
         "passed_threshold": bool(comparison.get("passed_threshold")),
         "reason_codes": reason_codes,

@@ -94,6 +94,14 @@ class FakeShadowStreamingClient:
     stream_calls = 0
     post_calls = 0
     post_payloads = []
+    # Shadows of streaming primaries stream too: the second (and later) stream()
+    # call on a request is the shadow leg. Its json body and served frames are
+    # tracked separately from the primary's.
+    shadow_stream_calls = 0
+    shadow_stream_payloads = []
+    shadow_frames = None  # defaults to `frames` when unset
+    shadow_stream_status = 200
+    shadow_stream_error_body = b""
     post_response = FakeShadowPostResponse()
     frames = STREAM_FRAMES
 
@@ -107,8 +115,17 @@ class FakeShadowStreamingClient:
         return False
 
     def stream(self, *args, **kwargs):
-        FakeShadowStreamingClient.stream_calls += 1
-        return FakeStreamResponseForFrames(FakeShadowStreamingClient.frames)
+        cls = FakeShadowStreamingClient
+        cls.stream_calls += 1
+        if cls.stream_calls > 1:
+            cls.shadow_stream_calls += 1
+            cls.shadow_stream_payloads.append(kwargs.get("json"))
+            if cls.shadow_stream_status >= 400:
+                return FakeStreamErrorResponseWithBody(
+                    cls.shadow_stream_status, cls.shadow_stream_error_body
+                )
+            return FakeStreamResponseForFrames(cls.shadow_frames or cls.frames)
+        return FakeStreamResponseForFrames(cls.frames)
 
     async def post(self, *args, **kwargs):
         # Managed control-plane calls (session-tier, client-contract) ride the
@@ -119,6 +136,26 @@ class FakeShadowStreamingClient:
         FakeShadowStreamingClient.post_calls += 1
         FakeShadowStreamingClient.post_payloads.append(kwargs.get("json"))
         return FakeShadowStreamingClient.post_response
+
+
+class FakeStreamErrorResponseWithBody:
+    headers = {}
+
+    def __init__(self, status_code, body_bytes):
+        self.status_code = status_code
+        self._body = body_bytes
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def aread(self):
+        return self._body
+
+    async def aiter_bytes(self):
+        yield self._body
 
 
 class FakeStreamResponseForFrames:
@@ -289,6 +326,11 @@ class StreamingCacheTest(unittest.TestCase):
         FakeShadowStreamingClient.stream_calls = 0
         FakeShadowStreamingClient.post_calls = 0
         FakeShadowStreamingClient.post_payloads = []
+        FakeShadowStreamingClient.shadow_stream_calls = 0
+        FakeShadowStreamingClient.shadow_stream_payloads = []
+        FakeShadowStreamingClient.shadow_frames = None
+        FakeShadowStreamingClient.shadow_stream_status = 200
+        FakeShadowStreamingClient.shadow_stream_error_body = b""
         FakeShadowStreamingClient.post_response = FakeShadowPostResponse()
         FakeShadowStreamingClient.frames = STREAM_FRAMES
 
@@ -481,10 +523,12 @@ class StreamingCacheTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(body, b"".join(STREAM_FRAMES))
-        self.assertEqual(FakeShadowStreamingClient.stream_calls, 1)
-        self.assertEqual(FakeShadowStreamingClient.post_calls, 1)
-        self.assertEqual(FakeShadowStreamingClient.post_payloads[0]["model"], "claude-haiku-4-5-20251001")
-        self.assertFalse(FakeShadowStreamingClient.post_payloads[0]["stream"])
+        # The shadow of a streaming primary streams too (second stream call).
+        self.assertEqual(FakeShadowStreamingClient.stream_calls, 2)
+        self.assertEqual(FakeShadowStreamingClient.post_calls, 0)
+        self.assertEqual(FakeShadowStreamingClient.shadow_stream_calls, 1)
+        self.assertEqual(FakeShadowStreamingClient.shadow_stream_payloads[0]["model"], "claude-haiku-4-5-20251001")
+        self.assertTrue(FakeShadowStreamingClient.shadow_stream_payloads[0]["stream"])
 
         [call] = server.store.conn.execute(
             "select stream, routing_json from calls"
@@ -516,6 +560,97 @@ class StreamingCacheTest(unittest.TestCase):
         serialized = json.dumps(payload, sort_keys=True)
         self.assertNotIn("What is the capital", serialized)
         self.assertNotIn("Hello", serialized)
+
+    def test_streaming_tool_turn_compares_tool_calls_not_text_fragments(self):
+        # THE capture fix: a streamed tool turn must contribute its tool_use
+        # blocks to the comparison. Reconstructing only text deltas made every
+        # streaming tool turn score ~0 against the shadow's complete body
+        # regardless of true equivalence (91/91 fable->opus probes, 2% pass).
+        tool_turn_frames = [
+            b'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}\n\n',
+            b'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+            b'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}\n\n',
+            b'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+            b'event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}}\n\n',
+            b'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\": \\"src/ma"}}\n\n',
+            b'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"in.py\\"}"}}\n\n',
+            b'event: content_block_stop\ndata: {"type":"content_block_stop","index":1}\n\n',
+            b'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":12}}\n\n',
+            b'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+        ]
+        FakeShadowStreamingClient.frames = tool_turn_frames
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 32,
+            "stream": True,
+            "messages": [{"role": "user", "content": "read main please"}],
+        }
+
+        with (
+            patch.object(server.httpx, "AsyncClient", FakeShadowStreamingClient),
+            patch.object(anthropic_proxy, "routing_experiment_decision", self._streaming_experiment_decision(random_value=0.0)),
+        ):
+            client = TestClient(server.app)
+            with client.stream("POST", "/v1/messages", json=request_body) as response:
+                b"".join(response.iter_bytes())
+
+        self.assertEqual(response.status_code, 200)
+        [call] = server.store.conn.execute("select routing_json from calls").fetchall()
+        experiment_meta = json.loads(call["routing_json"])["routing_experiment"]
+        feedback = experiment_meta["optimization_feedback"]
+        self.assertEqual(experiment_meta["status"], "compared")
+        # Same tool call (name + args, args assembled from split input_json_delta
+        # frames) on both sides -> full agreement on the tool-call metric.
+        self.assertEqual(feedback["primary_tool_call_count"], 1)
+        self.assertEqual(feedback["shadow_tool_call_count"], 1)
+        self.assertEqual(feedback["tool_name_similarity"], 1.0)
+        self.assertEqual(experiment_meta["output_similarity"], 1.0)
+        self.assertTrue(experiment_meta["passed_threshold"])
+        self.assertTrue(feedback["relaxed_passed"])
+        # Truncation observability: both stop reasons recorded.
+        self.assertEqual(feedback["primary_stop_reason"], "tool_use")
+        self.assertEqual(feedback["shadow_stop_reason"], "tool_use")
+        # Tool args never leave the proxy: metadata-only egress must hold with
+        # tool inputs present in the comparison.
+        [queued] = server.store.conn.execute(
+            "select payload_json from managed_outcome_feedback_queue"
+        ).fetchall()
+        payload = json.loads(queued["payload_json"])
+        assert_managed_egress_safe(payload)
+        self.assertNotIn("src/ma", json.dumps(payload, sort_keys=True))
+
+    def test_sse_content_accumulator_assembles_blocks_and_stop_reason(self):
+        accumulator = anthropic_proxy._AnthropicSseContentAccumulator()
+        frames = [
+            b'data: {"type":"message_start","message":{"usage":{"input_tokens":7,"cache_read_input_tokens":3}}}',
+            b'data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}',
+            b'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"secret reasoning"}}',
+            b'data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}',
+            b'data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Sure, "}}',
+            b'data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"done."}}',
+            b'data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_9","name":"grep","input":{}}}',
+            b'data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\\"pattern\\": "}}',
+            b'data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"\\"todo\\"}"}}',
+            b'data: {"type":"content_block_stop","index":2}',
+            b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}',
+        ]
+        for frame in frames:
+            accumulator.observe_sse_frame(frame)
+
+        content = accumulator.content()
+        self.assertEqual(
+            content,
+            [
+                {"type": "text", "text": "Sure, done."},
+                {"type": "tool_use", "id": "toolu_9", "name": "grep", "input": {"pattern": "todo"}},
+            ],
+        )
+        self.assertEqual(accumulator.stop_reason, "end_turn")
+        self.assertEqual(accumulator.input_tokens, 7)
+        self.assertEqual(accumulator.output_tokens, 9)
+        self.assertEqual(accumulator.cache_read_input_tokens, 3)
+        # Thinking is never accumulated.
+        self.assertNotIn("secret reasoning", json.dumps(content))
 
     def test_managed_policy_shadow_decision_collects_opus48_shadow_canary(self):
         routing_meta = {
@@ -706,7 +841,8 @@ class StreamingCacheTest(unittest.TestCase):
             "stream": True,
             "messages": [{"role": "user", "content": "Shadow should fail"}],
         }
-        FakeShadowStreamingClient.post_response = FakeShadowErrorPostResponse()
+        FakeShadowStreamingClient.shadow_stream_status = 400
+        FakeShadowStreamingClient.shadow_stream_error_body = FakeShadowErrorPostResponse.content
 
         with (
             patch.object(server.httpx, "AsyncClient", FakeShadowStreamingClient),
@@ -718,7 +854,7 @@ class StreamingCacheTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(body, b"".join(STREAM_FRAMES))
-        self.assertEqual(FakeShadowStreamingClient.post_calls, 1)
+        self.assertEqual(FakeShadowStreamingClient.shadow_stream_calls, 1)
         [call] = server.store.conn.execute("select routing_json from calls").fetchall()
         experiment_meta = json.loads(call["routing_json"])["routing_experiment"]
         self.assertEqual(experiment_meta["reason"], "streaming-shadow-http-400")
@@ -740,11 +876,12 @@ class StreamingCacheTest(unittest.TestCase):
         self.assertEqual(candidate["compared_samples"], 0)
         self.assertIn("shadow-http-400-observed", candidate["promotion_reason_codes"])
 
-    def test_streaming_shadow_clamps_large_max_tokens_for_non_streaming(self):
-        # A streaming primary commonly carries a large max_tokens (Opus 4.8
-        # traffic). Forcing the shadow leg to non-streaming without clamping it
-        # made Anthropic reject the shadow call with a 400, so no similarity
-        # evidence was recorded. The clamp keeps the shadow request valid.
+    def test_streaming_shadow_keeps_large_max_tokens_by_streaming(self):
+        # A streaming primary commonly carries a large max_tokens (Opus/Fable
+        # agent traffic). The shadow now streams too, so it keeps the primary's
+        # original max_tokens and thinking headroom instead of being clamped to
+        # the non-streaming ceiling — the clamp handicapped the shadow and
+        # tanked similarity on exactly the shapes worth learning.
         request_body = {
             "model": "claude-sonnet-4-6",
             "max_tokens": 64000,
@@ -762,6 +899,40 @@ class StreamingCacheTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(body, b"".join(STREAM_FRAMES))
+        self.assertEqual(FakeShadowStreamingClient.shadow_stream_calls, 1)
+        shadow_payload = FakeShadowStreamingClient.shadow_stream_payloads[0]
+        self.assertTrue(shadow_payload["stream"])
+        self.assertEqual(shadow_payload["max_tokens"], 64000)
+
+        [call] = server.store.conn.execute("select routing_json from calls").fetchall()
+        experiment_meta = json.loads(call["routing_json"])["routing_experiment"]
+        self.assertEqual(experiment_meta["status"], "compared")
+        preflight = experiment_meta["shadow_request_preflight"]
+        self.assertTrue(preflight["shadow_streaming"])
+        self.assertFalse(preflight["stream_forced_non_streaming"])
+        self.assertNotIn("max_tokens_clamped_for_non_streaming", preflight)
+
+    def test_streaming_shadow_kill_switch_restores_clamped_non_streaming_probe(self):
+        # With TOKENCLAW_ANTHROPIC_SHADOW_STREAMING off, the shadow falls back
+        # to the old forced non-streaming call, and the max_tokens clamp keeps
+        # that request valid against the non-streaming ceiling.
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 64000,
+            "stream": True,
+            "messages": [{"role": "user", "content": "What is the capital of France?"}],
+        }
+
+        with (
+            patch.object(anthropic_proxy, "ANTHROPIC_SHADOW_STREAMING", False),
+            patch.object(server.httpx, "AsyncClient", FakeShadowStreamingClient),
+            patch.object(anthropic_proxy, "routing_experiment_decision", self._streaming_experiment_decision(random_value=0.0)),
+        ):
+            client = TestClient(server.app)
+            with client.stream("POST", "/v1/messages", json=request_body) as response:
+                body = b"".join(response.iter_bytes())
+
+        self.assertEqual(response.status_code, 200)
         self.assertEqual(FakeShadowStreamingClient.post_calls, 1)
         shadow_payload = FakeShadowStreamingClient.post_payloads[0]
         self.assertFalse(shadow_payload["stream"])
@@ -785,30 +956,17 @@ class StreamingCacheTest(unittest.TestCase):
         # When the shadow leg still 4xxes, the truncated upstream message must be
         # retained (metadata-only) so the cause is diagnosable rather than
         # collapsed to the error type alone.
-        class FakeShadowMaxTokensErrorPostResponse:
-            status_code = 400
-            headers = {"content-type": "application/json"}
-            text = (
-                '{"error":{"type":"invalid_request_error",'
-                '"message":"max_tokens: 64000 > 8192, which is the maximum allowed for claude-sonnet-4-6"}}'
-            )
-            content = text.encode("utf-8")
-
-            def json(self):
-                return {
-                    "error": {
-                        "type": "invalid_request_error",
-                        "message": "max_tokens: 64000 > 8192, which is the maximum allowed for claude-sonnet-4-6",
-                    }
-                }
-
         request_body = {
             "model": "claude-sonnet-4-6",
             "max_tokens": 32,
             "stream": True,
             "messages": [{"role": "user", "content": "Shadow should 400"}],
         }
-        FakeShadowStreamingClient.post_response = FakeShadowMaxTokensErrorPostResponse()
+        FakeShadowStreamingClient.shadow_stream_status = 400
+        FakeShadowStreamingClient.shadow_stream_error_body = (
+            '{"error":{"type":"invalid_request_error",'
+            '"message":"max_tokens: 64000 > 8192, which is the maximum allowed for claude-sonnet-4-6"}}'
+        ).encode("utf-8")
 
         with (
             patch.object(server.httpx, "AsyncClient", FakeShadowStreamingClient),
@@ -819,7 +977,7 @@ class StreamingCacheTest(unittest.TestCase):
                 body = b"".join(response.iter_bytes())
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(FakeShadowStreamingClient.post_calls, 1)
+        self.assertEqual(FakeShadowStreamingClient.shadow_stream_calls, 1)
         [call] = server.store.conn.execute("select routing_json from calls").fetchall()
         experiment_meta = json.loads(call["routing_json"])["routing_experiment"]
         self.assertEqual(experiment_meta["status"], "shadow-http-400")
@@ -872,13 +1030,13 @@ class StreamingCacheTest(unittest.TestCase):
         self.assertEqual(body, b"".join(STREAM_FRAMES))
         shadow_posts = [
             payload
-            for payload in FakeShadowStreamingClient.post_payloads
+            for payload in FakeShadowStreamingClient.shadow_stream_payloads
             if isinstance(payload, dict) and payload.get("model") == "claude-haiku-4-5-20251001"
         ]
         self.assertEqual(len(shadow_posts), 1)
         shadow_payload = shadow_posts[0]
         self.assertEqual(shadow_payload["model"], "claude-haiku-4-5-20251001")
-        self.assertFalse(shadow_payload["stream"])
+        self.assertTrue(shadow_payload["stream"])
         self.assertNotIn("thinking", shadow_payload)
         self.assertNotIn("effort", shadow_payload)
         self.assertNotIn("interleaved_thinking", shadow_payload)
@@ -931,13 +1089,13 @@ class StreamingCacheTest(unittest.TestCase):
         self.assertEqual(body, b"".join(STREAM_FRAMES))
         shadow_posts = [
             payload
-            for payload in FakeShadowStreamingClient.post_payloads
+            for payload in FakeShadowStreamingClient.shadow_stream_payloads
             if isinstance(payload, dict) and payload.get("model") == "claude-haiku-4-5-20251001"
         ]
         self.assertEqual(len(shadow_posts), 1)
         shadow_payload = shadow_posts[0]
         self.assertEqual(shadow_payload["model"], "claude-haiku-4-5-20251001")
-        self.assertFalse(shadow_payload["stream"])
+        self.assertTrue(shadow_payload["stream"])
         assistant_blocks = shadow_payload["messages"][0]["content"]
         self.assertEqual([block["type"] for block in assistant_blocks], ["tool_use"])
         [call] = server.store.conn.execute("select routing_json from calls").fetchall()
@@ -1208,7 +1366,10 @@ class StreamingCacheTest(unittest.TestCase):
         self.assertEqual(body, b"".join(STREAM_FRAMES))
         shadow_posts = [
             payload
-            for payload in FakeShadowStreamingClient.post_payloads
+            for payload in (
+                FakeShadowStreamingClient.post_payloads
+                + FakeShadowStreamingClient.shadow_stream_payloads
+            )
             if isinstance(payload, dict) and payload.get("model") == "claude-haiku-4-5-20251001"
         ]
         self.assertEqual(shadow_posts, [])

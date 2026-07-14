@@ -133,6 +133,14 @@ MANAGED_SHADOW_DAILY_BUDGET_USD = float(
 ANTHROPIC_SHADOW_KEEP_THINKING = os.getenv(
     "TOKENCLAW_ANTHROPIC_SHADOW_KEEP_THINKING", "0"
 ).strip().lower() in {"1", "true", "yes", "on"}
+# Execute the shadow as a streaming call when the primary streamed. The forced
+# non-streaming shadow had to clamp max_tokens to the non-streaming ceiling
+# (64000 -> 8192 on agent traffic), handicapping the shadow's thinking + output
+# budget relative to the primary it is compared against. Default on; the kill
+# switch restores the old clamped non-streaming probes.
+ANTHROPIC_SHADOW_STREAMING = os.getenv(
+    "TOKENCLAW_ANTHROPIC_SHADOW_STREAMING", "1"
+).strip().lower() not in {"", "0", "false", "no", "off"}
 # Upstream invalid-request messages describe the request shape (parameter names
 # and limits), not prompt content, so a short truncated copy is safe to retain
 # for diagnosing future 4xx causes without leaking raw prompts. The cap stays at
@@ -262,6 +270,113 @@ def _record_routing_rate_limit_fallback(
         phase_canary["actual_forwarded_model"] = str(requested_model)
 
 
+class _AnthropicSseContentAccumulator:
+    """Rebuild assistant content (text + tool_use blocks), stop_reason, and usage
+    from an Anthropic SSE stream.
+
+    The routing-experiment comparison needs the streamed primary's FULL content:
+    reconstructing only the text deltas made every streaming tool turn compare as
+    "no tool calls" against the shadow's complete body, scoring near zero
+    regardless of true equivalence. Thinking deltas are deliberately not
+    accumulated — comparisons score visible output, and thinking never leaves the
+    proxy.
+    """
+
+    def __init__(self) -> None:
+        self._blocks: dict[int, dict[str, Any]] = {}
+        self._order: list[int] = []
+        self.stop_reason: str | None = None
+        self.input_tokens: int | None = None
+        self.output_tokens: int | None = None
+        self.cache_creation_input_tokens: int = 0
+        self.cache_read_input_tokens: int = 0
+
+    def observe(self, data: dict[str, Any]) -> None:
+        event_type = data.get("type")
+        if event_type == "message_start":
+            usage = (data.get("message") or {}).get("usage") or {}
+            self.input_tokens = usage.get("input_tokens")
+            self.cache_creation_input_tokens = usage.get("cache_creation_input_tokens") or 0
+            self.cache_read_input_tokens = usage.get("cache_read_input_tokens") or 0
+        elif event_type == "message_delta":
+            delta = data.get("delta") or {}
+            stop = delta.get("stop_reason")
+            if stop:
+                self.stop_reason = str(stop)
+            out = (data.get("usage") or {}).get("output_tokens")
+            if out is not None:
+                self.output_tokens = out
+        elif event_type == "content_block_start":
+            index = data.get("index")
+            block = data.get("content_block") or {}
+            if not isinstance(index, int) or not isinstance(block, dict) or index in self._blocks:
+                return
+            block_type = block.get("type")
+            if block_type == "text":
+                self._blocks[index] = {"type": "text", "text": str(block.get("text") or "")}
+                self._order.append(index)
+            elif block_type == "tool_use":
+                self._blocks[index] = {
+                    "type": "tool_use",
+                    "id": block.get("id"),
+                    "name": block.get("name"),
+                    "input": block.get("input") if isinstance(block.get("input"), dict) else {},
+                    "_partial_json": "",
+                }
+                self._order.append(index)
+        elif event_type == "content_block_delta":
+            index = data.get("index") if isinstance(data.get("index"), int) else 0
+            delta = data.get("delta") or {}
+            block = self._blocks.get(index)
+            if block is None:
+                # Providers always send content_block_start first, but tolerate a
+                # missing one (minimal fixtures, dropped frames) for text deltas
+                # rather than silently losing output.
+                if delta.get("type") != "text_delta":
+                    return
+                block = {"type": "text", "text": ""}
+                self._blocks[index] = block
+                self._order.append(index)
+            if delta.get("type") == "text_delta" and block.get("type") == "text":
+                block["text"] += str(delta.get("text") or "")
+            elif delta.get("type") == "input_json_delta" and block.get("type") == "tool_use":
+                block["_partial_json"] += str(delta.get("partial_json") or "")
+        elif event_type == "content_block_stop":
+            index = data.get("index")
+            block = self._blocks.get(index) if isinstance(index, int) else None
+            if block is not None and block.get("type") == "tool_use" and block.get("_partial_json"):
+                try:
+                    parsed = json.loads(block["_partial_json"])
+                except ValueError:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    block["input"] = parsed
+
+    def observe_sse_frame(self, frame: bytes) -> None:
+        for line in frame.decode("utf-8", errors="replace").splitlines():
+            if not line.startswith("data: "):
+                continue
+            payload = line[6:]
+            if payload == "[DONE]":
+                continue
+            try:
+                data = json.loads(payload)
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                self.observe(data)
+
+    def content(self) -> list[dict[str, Any]]:
+        blocks: list[dict[str, Any]] = []
+        for index in self._order:
+            block = dict(self._blocks[index])
+            block.pop("_partial_json", None)
+            if block.get("type") == "text" and not block.get("text"):
+                continue
+            blocks.append(block)
+        return blocks
+
+
 def _anthropic_stream_primary_response_body(
     *,
     output_text: str,
@@ -270,6 +385,8 @@ def _anthropic_stream_primary_response_body(
     cache_creation_input_tokens: int,
     cache_read_input_tokens: int,
     thinking_output_tokens: int | None,
+    content_blocks: list[dict[str, Any]] | None = None,
+    stop_reason: str | None = None,
 ) -> dict[str, Any]:
     usage: dict[str, Any] = {}
     if input_tokens is not None:
@@ -282,9 +399,13 @@ def _anthropic_stream_primary_response_body(
         usage["cache_read_input_tokens"] = cache_read_input_tokens
     if thinking_output_tokens is not None:
         usage["thinking_output_tokens"] = thinking_output_tokens
-    return {
+    if content_blocks:
+        content = content_blocks
+    else:
+        content = [{"type": "text", "text": output_text}] if output_text else []
+    body: dict[str, Any] = {
         "type": "message",
-        "content": [{"type": "text", "text": output_text}] if output_text else [],
+        "content": content,
         "usage": usage,
         "tokenclaw_streaming_capture": {
             "complete": True,
@@ -292,6 +413,9 @@ def _anthropic_stream_primary_response_body(
             "raw_stream_included": False,
         },
     }
+    if stop_reason:
+        body["stop_reason"] = stop_reason
+    return body
 
 
 def _mark_streaming_experiment_skip(
@@ -1102,24 +1226,29 @@ def _prepare_anthropic_shadow_request(
     *,
     shadow_model: str,
     primary_model: str,
+    stream_shadow: bool = False,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     shadow_body = copy.deepcopy(request_body)
     shadow_body["model"] = shadow_model
-    shadow_body["stream"] = False
+    shadow_body["stream"] = bool(stream_shadow)
     diagnostics: dict[str, Any] = {
         "schema": "tokenclaw.anthropic_shadow_request_preflight.v1",
         "status": "ok",
         "reason": None,
         "primary_model": primary_model,
         "shadow_model": shadow_model,
-        "stream_forced_non_streaming": True,
+        "stream_forced_non_streaming": not stream_shadow,
+        "shadow_streaming": bool(stream_shadow),
         "raw_request_included": False,
         "raw_prompts_included": False,
         "tool_payloads_included": False,
         "request_ids_included": False,
         "session_ids_included": False,
     }
-    _normalize_shadow_non_streaming_max_tokens(shadow_body, diagnostics)
+    if not stream_shadow:
+        # Non-streaming requests above the 10-minute ceiling 400; a streaming
+        # shadow keeps the primary's original max_tokens and thinking headroom.
+        _normalize_shadow_non_streaming_max_tokens(shadow_body, diagnostics)
     _fold_system_role_messages(shadow_body, diagnostics)
     sanitization: dict[str, Any] = {}
     keep_thinking = ANTHROPIC_SHADOW_KEEP_THINKING and _has_top_level_thinking(shadow_body)
@@ -1266,6 +1395,60 @@ async def _fetch_old_context_summary(context: ProviderContext, summary_request: 
     return meta
 
 
+async def _collect_anthropic_streaming_shadow(
+    client: Any,
+    *,
+    url: str,
+    headers: dict[str, str],
+    body: dict[str, Any],
+) -> tuple[int, dict[str, Any] | None]:
+    """Run the shadow as a streaming call and reconstruct its message body.
+
+    Streaming lets the shadow keep the primary's original max_tokens and
+    thinking headroom (the non-streaming ceiling forced a 64000 -> 8192 clamp on
+    agent traffic). On HTTP errors the JSON error body is returned so the
+    shadow-error classification and detail capture keep working.
+    """
+    accumulator = _AnthropicSseContentAccumulator()
+    async with client.stream("POST", url, headers=headers, json=body) as r:
+        status_code = r.status_code
+        if status_code >= 400:
+            try:
+                raw = await r.aread()
+                return status_code, json.loads(raw)
+            except Exception:
+                return status_code, None
+        buf = b""
+        async for chunk in r.aiter_bytes():
+            buf += chunk
+            while b"\n\n" in buf:
+                frame, buf = buf.split(b"\n\n", 1)
+                accumulator.observe_sse_frame(frame)
+        if buf:
+            accumulator.observe_sse_frame(buf)
+    usage: dict[str, Any] = {}
+    if accumulator.input_tokens is not None:
+        usage["input_tokens"] = accumulator.input_tokens
+    if accumulator.output_tokens is not None:
+        usage["output_tokens"] = accumulator.output_tokens
+    if accumulator.cache_creation_input_tokens:
+        usage["cache_creation_input_tokens"] = accumulator.cache_creation_input_tokens
+    if accumulator.cache_read_input_tokens:
+        usage["cache_read_input_tokens"] = accumulator.cache_read_input_tokens
+    reconstructed: dict[str, Any] = {
+        "type": "message",
+        "content": accumulator.content(),
+        "usage": usage,
+        "tokenclaw_streaming_capture": {
+            "complete": True,
+            "raw_stream_included": False,
+        },
+    }
+    if accumulator.stop_reason:
+        reconstructed["stop_reason"] = accumulator.stop_reason
+    return status_code, reconstructed
+
+
 async def _run_anthropic_routing_experiment(
     *,
     context: ProviderContext,
@@ -1288,6 +1471,7 @@ async def _run_anthropic_routing_experiment(
         request_body,
         shadow_model=shadow_model,
         primary_model=primary_model,
+        stream_shadow=ANTHROPIC_SHADOW_STREAMING and bool(request_body.get("stream")),
     )
     experiment_meta["shadow_request_preflight"] = shadow_preflight
     shadow_headers = _shadow_headers_for_model(headers, shadow_model)
@@ -1311,13 +1495,21 @@ async def _run_anthropic_routing_experiment(
                 async with async_client(timeout=context.http_timeout) as client:
                     await context.limiter.await_backoff(shadow_model)
                     await context.limiter.throttle_forward()
-                    r = await client.post(context.anthropic_upstream.rstrip("/") + path, headers=shadow_headers, json=shadow_body)
+                    if shadow_body.get("stream"):
+                        shadow_status_code, shadow_response_body = await _collect_anthropic_streaming_shadow(
+                            client,
+                            url=context.anthropic_upstream.rstrip("/") + path,
+                            headers=shadow_headers,
+                            body=shadow_body,
+                        )
+                    else:
+                        r = await client.post(context.anthropic_upstream.rstrip("/") + path, headers=shadow_headers, json=shadow_body)
+                        shadow_status_code = r.status_code
+                        try:
+                            shadow_response_body = r.json()
+                        except Exception:
+                            shadow_response_body = None
             shadow_latency_ms = int((time.time() - shadow_started) * 1000)
-            shadow_status_code = r.status_code
-            try:
-                shadow_response_body = r.json()
-            except Exception:
-                shadow_response_body = None
             http_error_class = _shadow_http_error_class(shadow_status_code, shadow_response_body)
             if http_error_class:
                 error = http_error_class
@@ -2005,6 +2197,10 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 stream_cancelled = False
                 stream_tool_use_ids: list[str] = []
                 stream_tool_use_missing_ids = 0
+                # Full-content capture (text + tool_use blocks + stop_reason) so
+                # the routing-experiment comparison sees the streamed primary's
+                # real output, not just its text deltas.
+                stream_content = _AnthropicSseContentAccumulator()
 
                 def parse_sse_usage(frame: bytes) -> None:
                     nonlocal actual_in, actual_out, cache_creation_in, cache_read_in, thinking_chars, stream_complete, stream_tool_use_missing_ids
@@ -2018,6 +2214,8 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                             data = json.loads(payload)
                         except Exception:
                             continue
+                        if isinstance(data, dict):
+                            stream_content.observe(data)
                         t = data.get("type")
                         if t == "message_start":
                             u = (data.get("message") or {}).get("usage", {})
@@ -2207,6 +2405,8 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                                 cache_creation_input_tokens=cache_creation_in,
                                 cache_read_input_tokens=cache_read_in,
                                 thinking_output_tokens=thinking_tokens,
+                                content_blocks=stream_content.content(),
+                                stop_reason=stream_content.stop_reason,
                             )
                             await _run_anthropic_routing_experiment(
                                 context=context,
