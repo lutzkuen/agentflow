@@ -7367,9 +7367,27 @@ def crunch_body(
 
     messages = new_body.get("messages") or []
     huge = before > threshold_chars
+    # Prompt-cache prefix stability: collapsing "old" text mutates bytes deep
+    # in the conversation prefix as blocks age past the recency window below,
+    # which invalidates the provider prompt cache from that depth and forces a
+    # full prefix re-write on the next call. Observed on production Claude Code
+    # sessions: 100k-600k cache-write tokens per bust (dollars per event),
+    # dwarfing the ~4% char trim the collapse earns on $/MTok-cheap cache
+    # reads. Requests that use provider prompt caching therefore never
+    # collapse: Anthropic bodies with cache_control breakpoints, and OpenAI
+    # surfaces (automatic prefix caching above ~1k tokens).
+    surface_l = str(source_surface or "")
+    if provider == "openai" or surface_l.startswith("openai") or surface_l == "codex_turn":
+        prompt_cache_sensitive = True
+    else:
+        prompt_cache_sensitive = bool(_anthropic_cache_prefix_boundary(new_body).get("present"))
+    if huge and prompt_cache_sensitive and _crunch_rule_allowed("old_text_collapse"):
+        skip_rule("old_text_collapse", "prompt-cache-prefix-stability")
     for idx, msg in enumerate(messages):
         # only shorten older text, not the latest user/assistant context
-        allow_shorten = huge and idx < max(0, len(messages) - 4)
+        allow_shorten = (
+            huge and not prompt_cache_sensitive and idx < max(0, len(messages) - 4)
+        )
         if isinstance(msg, dict) and "content" in msg:
             msg["content"] = process_content(msg["content"], allow_shorten=allow_shorten)
     if _crunch_rule_allowed("thinking_deduplication"):

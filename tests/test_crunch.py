@@ -524,6 +524,45 @@ crunch:
             self.assertTrue(semantic["requires_canary"])
             self.assertEqual(semantic["canary_state"], "held")
 
+    def test_old_text_collapse_suppressed_on_prompt_cached_requests(self):
+        # Collapsing aged blocks mutates the conversation prefix as blocks
+        # leave the recency window, which invalidates the provider prompt
+        # cache from that depth (observed: 100k-600k cache-write tokens per
+        # bust in production). Cache-bearing requests must never collapse.
+        def big_body(with_cache_control: bool, unique: str) -> dict:
+            messages = []
+            for i in range(8):
+                text = f"{unique} block {i} " * 2000 + f"unique-{unique}-{i}"
+                messages.append({"role": "user", "content": [{"type": "text", "text": text}]})
+            if with_cache_control:
+                messages[-1]["content"][0]["cache_control"] = {"type": "ephemeral"}
+            return {"model": "claude-opus-4-8", "max_tokens": 100, "messages": messages}
+
+        cached, cached_meta = crunch_module.crunch_body(
+            big_body(True, "cachedreq"), provider="anthropic", source_surface="anthropic_messages"
+        )
+        self.assertNotIn("middle of long older text block omitted", str(cached))
+        skip_reasons = {
+            (row.get("rule_id"), row.get("reason")) for row in cached_meta.get("skipped_rules", [])
+        }
+        self.assertIn(("old_text_collapse", "prompt-cache-prefix-stability"), skip_reasons)
+
+        uncached, uncached_meta = crunch_module.crunch_body(
+            big_body(False, "plainreq"), provider="anthropic", source_surface="anthropic_messages"
+        )
+        self.assertIn("middle of long older text block omitted", str(uncached))
+
+        # OpenAI surfaces auto-cache prefixes: never collapse there either.
+        openai_messages = [
+            {"role": "user", "content": f"openaireq block {i} " * 2000 + f"unique-oai-{i}"}
+            for i in range(8)
+        ]
+        openai_body = {"model": "gpt-5.6-terra", "messages": openai_messages}
+        crunched_openai, openai_meta = crunch_module.crunch_body(
+            openai_body, provider="openai", source_surface="openai_responses"
+        )
+        self.assertNotIn("middle of long older text block omitted", str(crunched_openai))
+
     def test_allowed_rules_blocks_old_text_collapse_with_rule_metadata(self):
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
