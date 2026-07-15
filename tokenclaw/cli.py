@@ -98,7 +98,6 @@ from tokenclaw.cli_commands.optimization_reports import (
     SCAFFOLD_ROLLOUT_ACTIONS_URL_ENV,
     openai_optimization_draft_dry_run_cli,
     openai_optimization_draft_apply_cli,
-    codex_app_policy_dry_run_cli,
     managed_rollout_actions_review_cli,
     optimization_rollout_actions_review_cli,
     optimization_rollout_actions_apply_cli,
@@ -120,7 +119,6 @@ from tokenclaw.cli_commands.optimization_reports import (
     openai_routing_report_cli,
     routing_coverage_report_cli,
     openai_routing_narrow_canary_review_cli,
-    anthropic_routing_canary_stage_cli,
     openai_old_context_summary_report_cli,
     openai_cache_replay_report_cli,
     openai_cache_replay_blocker_outcomes_cli,
@@ -1976,8 +1974,6 @@ def policy_draft_apply_main() -> None:
     raise SystemExit(policy_draft_apply_cli())
 
 
-def codex_app_policy_dry_run_main() -> None:
-    raise SystemExit(codex_app_policy_dry_run_cli())
 
 
 def managed_rollout_actions_review_main() -> None:
@@ -2070,8 +2066,6 @@ def openai_routing_narrow_canary_review_main() -> None:
     raise SystemExit(openai_routing_narrow_canary_review_cli())
 
 
-def anthropic_routing_canary_stage_main() -> None:
-    raise SystemExit(anthropic_routing_canary_stage_cli())
 
 
 def openai_old_context_summary_report_main() -> None:

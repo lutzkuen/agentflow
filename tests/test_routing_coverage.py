@@ -153,41 +153,6 @@ class RoutingCoverageReportTests(unittest.TestCase):
         self.assertEqual(anthropic["top_blocker_reason"], "anthropic-routing-safety-stop-active")
         self.assertEqual(anthropic["next_action"], "collect-anthropic-applied-holdout-coverage-before-routing")
 
-    def test_report_marks_codex_app_server_as_telemetry_only(self) -> None:
-        self.store.log_codex_app_event(
-            id="codex-event-1",
-            created_at=utc_now(),
-            direction="client_to_server",
-            method="turn/start",
-            request_id="secret-codex-request",
-            thread_id="secret-thread",
-            message_chars=1000,
-            params_chars=200,
-            input_items=1,
-            input_text_chars=800,
-            result_chars=0,
-            error_code=None,
-            error_message=None,
-            latency_ms=20,
-            session_id="secret-codex-session",
-            routing_json=stable_json({"status": "not-applied", "reason": "codex-app-telemetry-only"}),
-            crunch_json=None,
-            cache_json=None,
-            event_window_json=None,
-            metadata_json=None,
-        )
-
-        report = build_routing_coverage_report(self.store, limit=20)
-        codex = self._row(report, "codex_app_server_telemetry")
-
-        self.assertTrue(codex["traffic_seen"])
-        self.assertEqual(codex["sample_count"], 1)
-        self.assertTrue(codex["telemetry_only"])
-        self.assertFalse(codex["routing_supported"])
-        self.assertFalse(codex["routing_active"])
-        self.assertFalse(codex["local_mutation_possible"])
-        self.assertEqual(codex["top_blocker_reason"], "telemetry-only-no-provider-request-mutation")
-        self.assertIn("codex_app_server_telemetry", report["summary"]["telemetry_only_surfaces_with_traffic"])
 
     def test_stats_wrapper_and_cli_emit_metadata_only_report(self) -> None:
         self._log_call(

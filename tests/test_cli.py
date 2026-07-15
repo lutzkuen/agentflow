@@ -10447,151 +10447,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertNotIn("raw-session-id-must-not-leak", rendered)
             self.assertEqual((config_dir / "routing_rules.yaml").read_text(encoding="utf-8"), "rules: []\n")
 
-    def test_codex_app_policy_dry_run_projects_synthetic_fixture_and_recent_rows_without_mutation(self):
-        from tokenclaw.store import Store, stable_json, utc_now
 
-        bundle = self._managed_policy_bundle()
-        with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
-            policy_path = Path(tmp) / "managed-codex-app-bundle.json"
-            fixture_path = Path(tmp) / "codex-fixture.json"
-            policy_path.write_text(json.dumps(bundle), encoding="utf-8")
-            fixture_path.write_text(
-                json.dumps({
-                    "rows": [
-                        {
-                            "workflow_phase": "summary",
-                            "model_field_state": "derived_present",
-                            "input_size_bucket": "small",
-                            "cache_eligible": False,
-                            "cache_status": "skipped",
-                            "input_text_chars": 700,
-                            "result_chars": 80,
-                            "requested_model": "gpt-5.4",
-                            "raw_prompt": "fixture raw prompt must not leak",
-                        }
-                    ]
-                }),
-                encoding="utf-8",
-            )
-            store = Store(db_path)
-            try:
-                store.set_cache("codex-dry-run-existing-cache-key", "gpt-5.4", 10, {"result": "cached"})
-                store.log_codex_app_event(
-                    id="codex-dry-run-event",
-                    created_at=utc_now(),
-                    direction="client_to_server",
-                    method="turn/start",
-                    request_id="raw-request-id-must-not-leak",
-                    thread_id="raw-thread-id-must-not-leak",
-                    session_id="raw-session-id-must-not-leak",
-                    message_chars=1200,
-                    params_chars=900,
-                    input_items=1,
-                    input_text_chars=600,
-                    result_chars=120,
-                    routing_json=stable_json({
-                        "requested_model": "gpt-5.4",
-                        "workflow_phase": "summary",
-                    }),
-                    crunch_json=stable_json({"status": "skipped", "policy_source": "local-default"}),
-                    cache_json=stable_json({
-                        "status": "skipped",
-                        "eligible": False,
-                        "replayability_level": "turn-metadata-only",
-                        "policy_source": "local-default",
-                    }),
-                    event_window_json=stable_json({
-                        "schema": "tokenclaw.codex_app_event_window.v1",
-                        "workflow_phase": "summary",
-                        "model_field_state": "derived_present",
-                        "input_text_chars": 600,
-                        "result_chars": 120,
-                        "session_id": "raw-session-id-must-not-leak",
-                        "request_id": "raw-request-id-must-not-leak",
-                    }),
-                    metadata_json=stable_json({"kind": "turn_window"}),
-                )
-            finally:
-                store.conn.close()
-
-            stdout = io.StringIO()
-            code = cli.codex_app_policy_dry_run_cli(
-                [str(policy_path), "--db", db_path, "--fixture", str(fixture_path), "--recent-limit", "10"],
-                stdout=stdout,
-                stderr=io.StringIO(),
-            )
-
-            with sqlite3.connect(db_path) as conn:
-                cache_rows = conn.execute("select count(*) from cache").fetchone()[0]
-
-        self.assertEqual(code, 0)
-        self.assertEqual(cache_rows, 1)
-        payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["schema"], "tokenclaw.codex_app_policy_dry_run.v1")
-        self.assertTrue(payload["ok"])
-        self.assertFalse(payload["applied"])
-        self.assertFalse(payload["wrote_local_policy_files"])
-        self.assertFalse(payload["cache_table_mutated"])
-        self.assertFalse(payload["provider_calls_made"])
-        self.assertFalse(payload["managed_server_calls_made"])
-        self.assertEqual(payload["managed_lifecycle_feedback"]["event_phase"], "dry_run")
-        self.assertFalse(payload["managed_lifecycle_feedback"]["payload_included"])
-        self.assertIn("candidate-codex-summary", payload["managed_lifecycle_feedback"]["results"])
-        self.assertEqual(payload["summary"]["synthetic_rows"], 1)
-        self.assertEqual(payload["summary"]["fixture_rows"], 1)
-        self.assertEqual(payload["summary"]["recent_rows"], 1)
-        self.assertEqual(payload["summary"]["projected_applied_count"], 3)
-        candidate = payload["candidates"][0]
-        self.assertEqual(candidate["candidate_id"], "candidate-codex-summary")
-        self.assertEqual(candidate["projected_applied_count"], 3)
-        self.assertIn("model_hint", candidate["action_keys"])
-        encoded = json.dumps(payload, sort_keys=True)
-        self.assertNotIn("fixture raw prompt must not leak", encoded)
-        self.assertNotIn("raw-request-id-must-not-leak", encoded)
-        self.assertNotIn("raw-session-id-must-not-leak", encoded)
-        self.assertNotIn("codex-dry-run-existing-cache-key", encoded)
-        self.assertFalse(payload["privacy"]["raw_payloads_included"])
-        self.assertFalse(payload["privacy"]["cache_keys_included"])
-
-    def test_codex_app_policy_dry_run_fetches_bundle_without_writing_rules(self):
-        bundle = self._managed_policy_bundle()
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-
-        with TemporaryDirectory() as tmp:
-            db_path = str(Path(tmp) / "tokenclaw.sqlite3")
-            config_dir = Path(tmp) / "config"
-            with patch.dict(os.environ, {"TOKENCLAW_POLICY_CONFIG_DIR": str(config_dir), cli.MANAGED_POLICY_API_KEY_ENV: ""}, clear=False):
-                with patch("tokenclaw.cli.httpx.get") as get:
-                    get.return_value = httpx.Response(200, json=bundle)
-                    code = cli.codex_app_policy_dry_run_cli(
-                        [
-                            "--url",
-                            "http://managed.test/v1/policy-bundle-recommendation",
-                            "--allow-unauthenticated",
-                            "--db",
-                            db_path,
-                            "--recent-limit",
-                            "0",
-                            "--no-synthetic",
-                        ],
-                        stdout=stdout,
-                        stderr=stderr,
-                    )
-            self.assertFalse((config_dir / "codex_app_rules.yaml").exists())
-
-        self.assertEqual(code, 0)
-        self.assertEqual(stderr.getvalue(), "")
-        payload = json.loads(stdout.getvalue())
-        self.assertTrue(payload["ok"])
-        self.assertTrue(payload["validation"]["ok"])
-        self.assertTrue(payload["managed_server_calls_made"])
-        self.assertFalse(payload["wrote_local_policy_files"])
-        self.assertEqual(payload["fetch"]["status"], "received")
-        self.assertEqual(payload["summary"]["candidate_count"], 1)
-        call = get.call_args
-        self.assertEqual(call.kwargs["params"]["limit"], 50)
 
     def test_policy_fetch_review_cli_surfaces_pattern_candidates_without_raw_leakage(self):
         bundle = self._managed_policy_bundle()
@@ -11316,8 +11172,10 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertEqual(sections[section]["verdict"], "pass")
             self.assertTrue(sections[section]["reload_required_after_apply"])
         self.assertGreaterEqual(sections["routing"]["projected_impact"]["projected_applied_count"], 1)
-        self.assertGreaterEqual(sections["codex_app"]["projected_impact"]["projected_applied_count"], 2)
-        self.assertIn("codex_app_dry_run", payload)
+        # The Codex app-server relay is retired: codex_app rules still validate,
+        # but impact projection reports the retired surface instead of numbers.
+        self.assertEqual(payload["codex_app_dry_run"]["status"], "retired")
+        self.assertEqual(payload["codex_app_dry_run"]["reason"], "codex-app-server-surface-retired")
         rendered = validate_stdout.getvalue()
         self.assertNotIn("raw-request-id-must-not-leak", rendered)
         self.assertNotIn("raw-session-id-must-not-leak", rendered)

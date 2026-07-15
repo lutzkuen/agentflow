@@ -2289,29 +2289,35 @@ class SQLiteStore:
         *,
         source_surface: str | None = None,
         limit: int = 10000,
+        payload_contains: str | None = None,
     ) -> list[dict[str, Any]]:
+        """Queue rows with payloads, optionally SQL-prefiltered by substring.
+
+        The queue status scanners each json-parse every payload only to keep
+        rows matching one schema marker; on a large queue that costs tens of
+        seconds of CPU per pass. ``payload_contains`` pushes that filter into
+        SQLite as a LIKE scan; callers keep their exact Python-side check.
+        """
         capped = max(1, min(int(limit or 1), 10000))
+        clauses = []
+        params: list[Any] = []
         if source_surface:
-            rows = self.conn.execute(
-                """
-                select id, source_surface, endpoint, status, payload_json
-                from managed_outcome_feedback_queue
-                where source_surface = ?
-                order by created_at asc
-                limit ?
-                """,
-                (source_surface, capped),
-            ).fetchall()
-        else:
-            rows = self.conn.execute(
-                """
-                select id, source_surface, endpoint, status, payload_json
-                from managed_outcome_feedback_queue
-                order by created_at asc
-                limit ?
-                """,
-                (capped,),
-            ).fetchall()
+            clauses.append("source_surface = ?")
+            params.append(source_surface)
+        if payload_contains:
+            clauses.append("payload_json like ?")
+            params.append(f"%{payload_contains}%")
+        where = ("where " + " and ".join(clauses)) if clauses else ""
+        rows = self.conn.execute(
+            f"""
+            select id, source_surface, endpoint, status, payload_json
+            from managed_outcome_feedback_queue
+            {where}
+            order by created_at asc
+            limit ?
+            """,
+            (*params, capped),
+        ).fetchall()
         return [dict(row) for row in rows]
 
     def managed_outcome_feedback_freshness_rows(

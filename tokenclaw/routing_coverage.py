@@ -62,16 +62,14 @@ def _empty_surface(surface: str, label: str) -> dict[str, Any]:
     }
 
 
-def _surface_state(rows: list[dict[str, Any]], codex_app_event_count: int) -> dict[str, dict[str, Any]]:
+def _surface_state(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     surfaces = {
         "openai_api": _empty_surface("openai_api", "OpenAI-compatible API apps"),
         "codex_vscode_or_cli": _empty_surface("codex_vscode_or_cli", "Codex VS Code / CLI through OpenAI-compatible proxy"),
-        "codex_app_server_telemetry": _empty_surface("codex_app_server_telemetry", "Codex turn telemetry"),
         "anthropic_api": _empty_surface("anthropic_api", "Anthropic-compatible API apps"),
         "claude_vscode_or_claude_code": _empty_surface("claude_vscode_or_claude_code", "Claude VS Code / Claude Code"),
         "unsupported_or_unknown": _empty_surface("unsupported_or_unknown", "Unsupported or unknown surface"),
     }
-    surfaces["codex_app_server_telemetry"]["sample_count"] = max(0, codex_app_event_count)
 
     for row in rows:
         routing = _json_obj(row.get("routing_json"))
@@ -229,21 +227,6 @@ def _report_rows(surfaces: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
             ),
         ),
         _row(
-            surfaces["codex_app_server_telemetry"],
-            routing_supported=False,
-            routing_active=False,
-            local_mutation_possible=False,
-            holdout_available=False,
-            outcome_feedback_available=False,
-            top_blocker_reason="telemetry-only-no-provider-request-mutation",
-            next_action="keep-codex-turn-routing-telemetry-only",
-            telemetry_only=True,
-            explanation=(
-                "The Codex turn telemetry surface records events, not provider requests that the local "
-                "proxy can safely mutate, so it can inform policy but cannot execute routing."
-            ),
-        ),
-        _row(
             surfaces["anthropic_api"],
             routing_supported=True,
             routing_active=False,
@@ -331,23 +314,8 @@ def build_routing_coverage_report(store_obj: Any, limit: int = 5000) -> dict[str
             (capped_limit,),
         ).fetchall()
     ]
-    try:
-        codex_row = store_obj.conn.execute(
-            """
-            select count(*) as count
-            from (
-              select id from codex_app_events
-              order by created_at desc
-              limit ?
-            )
-            """,
-            (capped_limit,),
-        ).fetchone()
-        codex_app_event_count = _as_int(codex_row["count"] if codex_row else 0)
-    except Exception:
-        codex_app_event_count = 0
 
-    surfaces = _surface_state(call_rows, codex_app_event_count)
+    surfaces = _surface_state(call_rows)
     rows = _report_rows(surfaces)
     active_surfaces = [row["surface"] for row in rows if row["routing_active"]]
     telemetry_only = [row["surface"] for row in rows if row["telemetry_only"] and row["traffic_seen"]]
@@ -361,7 +329,6 @@ def build_routing_coverage_report(store_obj: Any, limit: int = 5000) -> dict[str
             "active_surface_count": len(active_surfaces),
             "metadata_only": True,
             "sample_count": len(call_rows),
-            "codex_app_event_count": codex_app_event_count,
             "telemetry_only_surfaces_with_traffic": telemetry_only,
             "next_expansion_surface": next_expansion,
         },

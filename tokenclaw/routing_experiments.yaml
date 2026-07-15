@@ -31,7 +31,6 @@ source_surfaces:
   - anthropic_messages
   - openai_responses
   - openai_chat
-  - codex_turn
 streaming_shadow_source_surfaces:
   - anthropic_messages
 

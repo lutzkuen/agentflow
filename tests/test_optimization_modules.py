@@ -71,7 +71,7 @@ class FakeFeedbackStore:
         self.due_limit = limit
         return self.managed_outcome_feedback_rows(source_surface=source_surface, limit=limit)
 
-    def managed_outcome_feedback_payload_rows(self, *, source_surface=None, limit=10000):
+    def managed_outcome_feedback_payload_rows(self, *, source_surface=None, limit=10000, payload_contains=None):
         return []
 
 

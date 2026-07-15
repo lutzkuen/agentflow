@@ -100,39 +100,7 @@ CODEX_ACTION_VALUE_HINTS = {
     "tool_use",
 }
 CODEX_MODEL_FIELDS = ("model", "modelId", "model_id")
-CODEX_MODEL_STATE_FIELDS = (
-    "model",
-    "modelId",
-    "model_id",
-    "activeModel",
-    "active_model",
-    "defaultModel",
-    "default_model",
-    "modelName",
-    "model_name",
-)
-CODEX_MODEL_STATE_SKIP_KEYS = {
-    "cmd",
-    "command",
-    "content",
-    "input",
-    "input_text",
-    "inputtext",
-    "instructions",
-    "message",
-    "messages",
-    "patch",
-    "prompt",
-    "raw_request",
-    "raw_response",
-    "result",
-    "response",
-    "text",
-    "tool_call",
-    "tool_calls",
-    "tool_result",
-    "tool_results",
-}
+
 CODEX_SAFE_TURN_PARAM_KEYS = {
     "input",
     "instructions",
@@ -147,6 +115,7 @@ CODEX_SAFE_TURN_PARAM_KEYS = {
     "top_p",
     "topP",
 }
+
 CODEX_TEXT_INPUT_TYPES = {"text", "input_text"}
 
 
@@ -749,59 +718,10 @@ def is_codex_turn_source_surface(value: Any) -> bool:
     return canonical_source_surface(value) == CODEX_TURN_SOURCE_SURFACE
 
 
-def _normalized_model_field(value: Any) -> str:
-    return str(value or "").replace("-", "_").lower()
 
 
-def _normalized_model_value(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    cleaned = value.strip()
-    if not cleaned or len(cleaned) > 100:
-        return None
-    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-/")
-    if any(char not in allowed for char in cleaned):
-        return None
-    return cleaned
 
 
-def codex_model_state_signal(method: Any, params: Any) -> dict[str, Any] | None:
-    if not isinstance(params, dict):
-        return None
-    model_fields = {_normalized_model_field(field) for field in CODEX_MODEL_STATE_FIELDS}
-    stack: list[Any] = [params]
-    explicit_absent: dict[str, Any] | None = None
-    while stack:
-        current = stack.pop()
-        if isinstance(current, dict):
-            for key, value in current.items():
-                key_s = str(key)
-                normalized_key = _normalized_model_field(key_s)
-                if normalized_key in model_fields:
-                    normalized = _normalized_model_value(value)
-                    if normalized:
-                        return {
-                            "state": "derived_present",
-                            "field": key_s,
-                            "normalized_model": normalized,
-                            "source_method": str(method or "unknown"),
-                            "confidence": "high",
-                            "reason": "metadata-model-field",
-                        }
-                    if value is None or value == "":
-                        explicit_absent = {
-                            "state": "derived_absent",
-                            "field": key_s,
-                            "normalized_model": None,
-                            "source_method": str(method or "unknown"),
-                            "confidence": "high",
-                            "reason": "metadata-model-field-empty",
-                        }
-                elif normalized_key not in CODEX_MODEL_STATE_SKIP_KEYS and isinstance(value, (dict, list)):
-                    stack.append(value)
-        elif isinstance(current, list):
-            stack.extend(item for item in current if isinstance(item, (dict, list)))
-    return explicit_absent
 
 
 CODEX_APP_POLICY, CODEX_APP_POLICY_SOURCE, CODEX_APP_RULES_PATH = _load_codex_app_policy()

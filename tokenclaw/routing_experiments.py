@@ -150,7 +150,7 @@ def _default_experiment_policy() -> dict[str, Any]:
         "min_text_chars": 0,
         "max_text_chars": 8000,
         "providers": ["openai"],
-        "source_surfaces": ["openai_responses", "openai_chat", "codex_turn"],
+        "source_surfaces": ["openai_responses", "openai_chat"],
         "streaming_shadow_source_surfaces": [],
         "blocklist": [],
         "preferred_pathways": [],

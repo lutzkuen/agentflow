@@ -64,7 +64,9 @@ def _pattern_evidence_status(
     source_surface: str | None,
 ) -> dict[str, Any]:
     rows = (
-        store.managed_outcome_feedback_payload_rows(source_surface=source_surface, limit=10000)
+        store.managed_outcome_feedback_payload_rows(
+            source_surface=source_surface, limit=10000, payload_contains="pattern_policy_evidence"
+        )
         if hasattr(store, "managed_outcome_feedback_payload_rows")
         else []
     )
@@ -117,7 +119,9 @@ def _routing_experiment_status(
     source_surface: str | None,
 ) -> dict[str, Any]:
     rows = (
-        store.managed_outcome_feedback_payload_rows(source_surface=source_surface, limit=10000)
+        store.managed_outcome_feedback_payload_rows(
+            source_surface=source_surface, limit=10000, payload_contains="tokenclaw.routing_experiment_outcome_event.v1"
+        )
         if hasattr(store, "managed_outcome_feedback_payload_rows")
         else []
     )
@@ -158,7 +162,9 @@ def _codex_app_canary_lifecycle_status(
     source_surface: str | None,
 ) -> dict[str, Any]:
     rows = (
-        store.managed_outcome_feedback_payload_rows(source_surface=source_surface, limit=10000)
+        store.managed_outcome_feedback_payload_rows(
+            source_surface=source_surface, limit=10000, payload_contains="tokenclaw.codex_app_canary_lifecycle_feedback.v1"
+        )
         if hasattr(store, "managed_outcome_feedback_payload_rows")
         else []
     )
@@ -368,7 +374,9 @@ def _routing_promotion_lifecycle_status(
     source_surface: str | None,
 ) -> dict[str, Any]:
     rows = (
-        store.managed_outcome_feedback_payload_rows(source_surface=source_surface, limit=10000)
+        store.managed_outcome_feedback_payload_rows(
+            source_surface=source_surface, limit=10000, payload_contains="tokenclaw.optimization_promotion_lifecycle_feedback.v1"
+        )
         if hasattr(store, "managed_outcome_feedback_payload_rows")
         else []
     )
@@ -544,7 +552,9 @@ def _terminal_output_compaction_lifecycle_status(
     source_surface: str | None,
 ) -> dict[str, Any]:
     rows = (
-        store.managed_outcome_feedback_payload_rows(source_surface=source_surface, limit=10000)
+        store.managed_outcome_feedback_payload_rows(
+            source_surface=source_surface, limit=10000, payload_contains="tokenclaw.terminal_output_compaction_lifecycle_feedback.v1"
+        )
         if hasattr(store, "managed_outcome_feedback_payload_rows")
         else []
     )
@@ -659,7 +669,9 @@ def _codex_terminal_transcript_lifecycle_status(
     source_surface: str | None,
 ) -> dict[str, Any]:
     rows = (
-        store.managed_outcome_feedback_payload_rows(source_surface=source_surface, limit=10000)
+        store.managed_outcome_feedback_payload_rows(
+            source_surface=source_surface, limit=10000, payload_contains="tokenclaw.codex_terminal_transcript_compaction_lifecycle_feedback.v1"
+        )
         if hasattr(store, "managed_outcome_feedback_payload_rows")
         else []
     )
@@ -772,7 +784,9 @@ def _openai_optimization_lifecycle_status(
     source_surface: str | None,
 ) -> dict[str, Any]:
     rows = (
-        store.managed_outcome_feedback_payload_rows(source_surface=source_surface, limit=10000)
+        store.managed_outcome_feedback_payload_rows(
+            source_surface=source_surface, limit=10000, payload_contains="tokenclaw.openai_optimization_lifecycle_feedback.v1"
+        )
         if hasattr(store, "managed_outcome_feedback_payload_rows")
         else []
     )
@@ -884,7 +898,9 @@ def _optimization_coordinator_lifecycle_status(
     source_surface: str | None,
 ) -> dict[str, Any]:
     rows = (
-        store.managed_outcome_feedback_payload_rows(source_surface=source_surface, limit=10000)
+        store.managed_outcome_feedback_payload_rows(
+            source_surface=source_surface, limit=10000, payload_contains="tokenclaw.optimization_coordinator_lifecycle_feedback.v1"
+        )
         if hasattr(store, "managed_outcome_feedback_payload_rows")
         else []
     )
@@ -1024,7 +1040,9 @@ def _post_promotion_action_outcome_status(
     source_surface: str | None,
 ) -> dict[str, Any]:
     rows = (
-        store.managed_outcome_feedback_payload_rows(source_surface=source_surface, limit=10000)
+        store.managed_outcome_feedback_payload_rows(
+            source_surface=source_surface, limit=10000, payload_contains="tokenclaw.promotion_blocker_action_outcome_rollup_ingest.v1"
+        )
         if hasattr(store, "managed_outcome_feedback_payload_rows")
         else []
     )

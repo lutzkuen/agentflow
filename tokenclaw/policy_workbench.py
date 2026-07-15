@@ -458,24 +458,17 @@ def _run_codex_dry_run(bundle: dict[str, Any], *, db_path: str | None, recent_li
     codex = policies.get("codex_app") if isinstance(policies.get("codex_app"), dict) else {}
     if not codex.get("rules"):
         return None
-    from tokenclaw.codex_app_dry_run import dry_run_codex_app_policy
-    from tokenclaw.store import Store
-
-    store = None
-    if db_path:
-        path = Path(db_path).expanduser()
-        if path.exists():
-            store = Store(str(path))
-    try:
-        return dry_run_codex_app_policy(
-            bundle,
-            store=store,
-            recent_limit=max(0, recent_limit),
-            include_synthetic=True,
-        )
-    finally:
-        if store is not None:
-            store.conn.close()
+    # The Codex app-server relay is retired and its surface emits no traffic;
+    # impact projection for codex_app rules is no longer available.
+    return {
+        "schema": "tokenclaw.codex_app_policy_dry_run.v1",
+        "status": "retired",
+        "reason": "codex-app-server-surface-retired",
+        "dry_run": True,
+        "applied": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+    }
 
 
 async def validate_staged_policy_draft(
