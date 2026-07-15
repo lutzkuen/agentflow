@@ -216,13 +216,17 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         )
         short_candidate = next(row for row in result["candidates"] if row["category"] == "short-completion")
         self.assertEqual(chat_candidate["matched_count"], 6)
-        self.assertEqual(chat_candidate["target_model"], "gpt-5-mini")
-        self.assertEqual(short_candidate["target_model"], "gpt-5-nano")
+        # 2026-07 ladder: deprecated gpt-5.4 proposals target gpt-5.6-luna.
+        self.assertEqual(chat_candidate["target_model"], "gpt-5.6-luna")
+        self.assertEqual(short_candidate["target_model"], "gpt-5.6-luna")
 
         blockers = {row["value"]: row["count"] for row in result["blocker_reason_breakdown"]}
         self.assertIn("tools-disabled", blockers)
-        self.assertIn("unknown-model-family", blockers)
         self.assertIn("stream-only-evidence", blockers)
+        # Models outside the routing ladder no longer get blocked proposals;
+        # they stay unmatched.
+        unmatched = {row["value"]: row["count"] for row in result["unmatched_reason_breakdown"]}
+        self.assertIn("no-local-routing-shape-match", unmatched)
 
         rendered = json.dumps(result, sort_keys=True)
         self.assertNotIn("secret-openai-session", rendered)
@@ -251,7 +255,7 @@ class OpenAIRoutingReportTests(unittest.TestCase):
 
         candidate = result["candidates"][0]
         self.assertEqual(candidate["requested_model"], "gpt-5.4")
-        self.assertEqual(candidate["target_model"], "gpt-5.4-mini")
+        self.assertEqual(candidate["target_model"], "gpt-5.6-luna")
         self.assertEqual(candidate["current_routed_count"], 0)
         self.assertEqual(candidate["blocked_count"], 0)
         self.assertGreater(candidate["estimated_savings_per_1000_calls_usd"], 0)
@@ -836,7 +840,7 @@ class OpenAIRoutingReportTests(unittest.TestCase):
 
         output = io.StringIO()
         exit_code = cli.openai_routing_report_cli(
-            ["--db", self.db_path, "--limit", "20", "--promotion-decision"],
+            ["--db", self.db_path, "--limit", "20", "--promotion-decision", "--target-model", "gpt-5.4-mini"],
             stdout=output,
         )
         self.assertEqual(exit_code, 0)

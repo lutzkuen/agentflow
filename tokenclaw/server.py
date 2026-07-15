@@ -41,14 +41,16 @@ MIN_REQUEST_INTERVAL_MS = env_int("TOKENCLAW_MIN_REQUEST_INTERVAL_MS", 0)
 MAX_TIER_BACKOFF_WAIT = env_float("TOKENCLAW_MAX_TIER_BACKOFF_WAIT", 30.0)
 # 0 = disabled (unlimited concurrency). Default 2 prevents burst collisions before global backoff coordinates.
 MAX_CONCURRENT_PER_TIER = env_int("TOKENCLAW_MAX_CONCURRENT_PER_TIER", 2)
+# Advertised /v1/models list: the current OpenAI generation per the 2026-07
+# routing ladder (5.6 tiers, gpt-5-mini rock bottom, live codex line).
 OPENAI_MODEL_LIST = list(dict.fromkeys([
     env("TOKENCLAW_OPENAI_LARGE_MODEL", "gpt-5-codex"),
     env("TOKENCLAW_OPENAI_SMALL_MODEL", "gpt-5-mini"),
-    env("TOKENCLAW_OPENAI_TINY_MODEL", "gpt-5-nano"),
-    "gpt-5.4",
-    "gpt-5.4-mini",
-    "gpt-5.5",
-    "gpt-5.2-codex",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.6",
+    "gpt-5.3-codex",
     "gpt-5-codex",
 ]))
 OPENAI_AUTH_MODE = env("TOKENCLAW_OPENAI_AUTH_MODE", "client").lower()

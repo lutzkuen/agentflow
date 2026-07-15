@@ -317,6 +317,23 @@ def _endpoint(row: dict[str, Any]) -> str:
     return str(row.get("endpoint") or openai_endpoint(str(row.get("path") or "")))
 
 
+# Savings-simulation targets follow the 2026-07 routing ladder: 5.6 tiers step
+# down sol -> terra -> luna, gpt-5-mini is the deliberate rock bottom, and
+# deprecated 5.5/5.4 jump straight to the cheaper current-generation sibling.
+# Prefix order matters (tiers before the bare 5.6 alias, 5.3-codex before 5.3).
+_SIMULATED_LADDER_TARGETS = {
+    "gpt-5.6-sol": "gpt-5.6-terra",
+    "gpt-5.6-terra": "gpt-5.6-luna",
+    "gpt-5.6-luna": "gpt-5-mini",
+    "gpt-5.6": "gpt-5.6-terra",
+    "gpt-5.5": "gpt-5.6-terra",
+    "gpt-5.4": "gpt-5.6-luna",
+    "gpt-5.3-codex": "gpt-5-codex",
+    "gpt-5-codex": "gpt-5-mini",
+    "gpt-5.3": "gpt-5-mini",
+}
+
+
 def _simulate_openai_route(
     *,
     requested_model: str,
@@ -325,21 +342,16 @@ def _simulate_openai_route(
     text_chars: int,
 ) -> tuple[str | None, str, str]:
     requested_l = requested_model.lower()
-    if requested_l == "gpt-5.4" and text_chars < OPENAI_SMALL_TEXT_CHARS_LT and not has_tools:
-        return "gpt-5.4-mini", "proposed-canary-default-off", "gpt-5.4-large-to-mini-short-non-tool"
-    if requested_l == "gpt-5.4" and category == "tool-light" and text_chars < OPENAI_GPT54_CANARY_TEXT_CHARS_LT:
-        return "gpt-5.4-mini", "local-openai-routing-canary", "gpt-5.4-large-to-mini-tool-light-canary"
-    if requested_l == OPENAI_LARGE_DEFAULT.lower() and text_chars < OPENAI_SMALL_TEXT_CHARS_LT and not has_tools:
-        return OPENAI_SMALL_DEFAULT, "existing-threshold", "large-to-small-short-non-tool"
-    if requested_l == OPENAI_SMALL_DEFAULT.lower() and text_chars < OPENAI_TINY_TEXT_CHARS_LT and not has_tools:
-        return OPENAI_TINY_DEFAULT, "existing-threshold", "small-to-tiny-short-non-tool"
-
-    if category == "short-completion" and text_chars < OPENAI_TINY_TEXT_CHARS_LT:
-        return OPENAI_TINY_DEFAULT, "proposed-canary-default-off", "short-completion-to-tiny"
-    if category in {"chat", "summary"} and text_chars < OPENAI_SMALL_TEXT_CHARS_LT:
-        return OPENAI_SMALL_DEFAULT, "proposed-canary-default-off", "chat-summary-to-small"
-    if category == "tool-light" and text_chars < OPENAI_SMALL_TEXT_CHARS_LT:
-        return OPENAI_SMALL_DEFAULT, "proposed-canary-default-off", "tool-light-to-small-needs-tool-safety"
+    target = next(
+        (t for prefix, t in _SIMULATED_LADDER_TARGETS.items() if requested_l.startswith(prefix)),
+        None,
+    )
+    if target is None:
+        return None, "none", "no-local-routing-shape-match"
+    if text_chars < OPENAI_SMALL_TEXT_CHARS_LT and not has_tools:
+        return target, "proposed-canary-default-off", "ladder-adjacent-short-non-tool"
+    if category in {"chat", "summary", "short-completion", "tool-light"} and text_chars < OPENAI_SMALL_TEXT_CHARS_LT:
+        return target, "proposed-canary-default-off", f"ladder-adjacent-{category}"
     return None, "none", "no-local-routing-shape-match"
 
 
@@ -350,6 +362,9 @@ def _target_supported(model: str | None) -> bool:
 
 
 def _candidate_allows_tools(bucket: dict[str, Any]) -> bool:
+    # Historical rows from the retired local gpt-5.4 tool-light canary keep
+    # their tools allowance so their promotion/rollback lifecycle can still be
+    # evaluated; new simulation proposals never allow tools.
     return (
         str(bucket.get("requested_model") or "").lower() == "gpt-5.4"
         and str(bucket.get("target_model") or "").lower() == "gpt-5.4-mini"
@@ -1379,15 +1394,18 @@ def build_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict[str, 
             has_tools=has_tools,
             text_chars=text_chars,
         )
-        if not target_model:
-            canary_target = _canary_lifecycle_target(
-                openai_canary=openai_canary,
-                requested_model=requested_model,
-            )
-            if canary_target is None:
-                _increment(unmatched_reason_counts, reason)
-                continue
+        # Rows carrying canary lifecycle metadata describe what actually ran
+        # (the retired local canary); their evidence buckets by that target,
+        # never by a fresh ladder simulation.
+        canary_target = _canary_lifecycle_target(
+            openai_canary=openai_canary,
+            requested_model=requested_model,
+        )
+        if canary_target is not None:
             target_model, policy, reason = canary_target
+        elif not target_model:
+            _increment(unmatched_reason_counts, reason)
+            continue
         if target_model.lower() == requested_model.lower():
             _increment(unmatched_reason_counts, "target-same-as-requested")
             continue

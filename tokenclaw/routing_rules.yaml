@@ -42,102 +42,17 @@
 #   route_to  — "haiku", "sonnet", "opus" (resolves to current default model), or a full model ID
 #   reason    — logged in routing metadata
 
-# Optional behavior-changing phase canary. Disabled by default. When enabled in a
-# local manual policy, eligible Sonnet requests are deterministically assigned to
-# applied, holdout, or not-selected cohorts from metadata-only request features.
-phase_canary:
-  enabled: true
-  policy_id: local-phase-opus-sonnet-canary-v1
-  model_pattern: opus
-  stream: true
-  target_model: sonnet
-  eligible_workflow_phases:
-    - tool-execution
-    - summary
-  excluded_workflow_phases:
-    - planning
-    - thinking
-    - verification
-    - unknown
-  eligible_categories:
-    - tool-result
-    - tool-light
-    - chat
-  excluded_categories:
-    - tool-heavy
-    - code-gen
-    - long-context
-    - short-completion
-  min_workflow_phase_confidence: high
-  min_text_chars: 0
-  max_text_chars: 0
-  canary_fraction: 0.10
-  holdout_fraction: 0.10
-  salt: tokenclaw-phase-opus-sonnet-canary-v1
-  cohort_unit: session
-  safety_gates:
-    block_thinking_history: false
-    block_top_level_thinking: false
-    block_unsupported_streaming_shape: true
-    block_unsafe_tool_call_context: true
-    strip_model_incompatible_params: true
-    fallback_to_requested_on_rate_limit: true
-    content_free: true
-  safety_stop:
-    enabled: true
-    window_hours: 24
-    min_samples: 10
-    min_holdout_samples: 5
-    max_error_rate: 0.05
-    max_retry_rate: 0.20
-    max_fallback_rate: 0.20
-    max_latency_regression_ratio: 1.50
-    limit: 500
-
-# Optional behavior-changing OpenAI routing canary. A local manual policy may
-# define either this backward-compatible singleton `openai_canary:` section or
-# an `openai_canaries:` list with independent `policy_id`, target, filters, and
-# safety-stop settings per candidate. Eligible OpenAI requests are
-# deterministically assigned to applied, holdout, or not-selected cohorts from
-# metadata-only request features. The target model must stay inside the OpenAI
-# provider family.
-openai_canary:
-  enabled: true
-  policy_id: local-openai-routing-canary-v1
-  model_pattern: gpt-5.4
-  target_model: gpt-5.4-mini
-  eligible_categories:
-    - chat
-    - short-completion
-    - tool-light
-  excluded_categories:
-    - tool-result
-    - tool-heavy
-    - code-gen
-    - long-context
-  allow_tools: true
-  allow_stream: false
-  min_text_chars: 0
-  max_text_chars: 16000
-  min_input_tokens_est: 0
-  max_input_tokens_est: 4000
-  canary_fraction: 0.15
-  holdout_fraction: 0.10
-  salt: tokenclaw-openai-routing-canary-v1
-  cohort_unit: request_features_sequence
-  safety_stop:
-    enabled: true
-    window_hours: 24
-    min_samples: 20
-    min_holdout_samples: 10
-    max_error_rate: 0.03
-    max_retry_rate: 0.10
-    max_fallback_rate: 0.10
-    max_latency_regression_ratio: 1.50
-    limit: 1000
+# Canary, holdout, and cohort routing are owned by managed policy decisions
+# (the local router runs any locally-defined canary policy as retired). This
+# file only carries manual hard rules; rules below are template examples that
+# apply once copied into ~/.tokenclaw/routing_rules.yaml.
 
 rules:
 
+# Recorded rollback verdict: this rule stays disabled so the promotion
+# pipeline keeps blocking re-promotion of the quality-regressed
+# gpt-5.4 -> gpt-5.4-mini tool-light shape. Do not delete while that
+# evidence should keep gating.
 - id: promoted-openai-gpt54-tool-light-mini
   enabled: false
   disabled_reason: semantic-quality-regression-observed
@@ -200,6 +115,7 @@ rules:
       individual_candidates_included: false
       provider_calls_made: false
       managed_server_calls_made: false
+
 
 - conditions:
     model_pattern: "opus"
