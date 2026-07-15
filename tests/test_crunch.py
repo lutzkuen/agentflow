@@ -524,6 +524,93 @@ crunch:
             self.assertTrue(semantic["requires_canary"])
             self.assertEqual(semantic["canary_state"], "held")
 
+    def _terminal_tool_result_body(self, *, with_cache_control: bool = False) -> dict:
+        log = "\n".join(
+            [f"[build] compiling module_{i}.o ... ok" for i in range(400)]
+            + ["ERROR: undefined symbol foo_bar in module_231.o", "make: *** [all] Error 1"]
+        )
+        body = {
+            "model": "claude-opus-4-8",
+            "max_tokens": 100,
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "run the build"}]},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "make"}}]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text", "text": log}]},
+                ]},
+            ],
+        }
+        if with_cache_control:
+            body["messages"][-1]["content"][0]["cache_control"] = {"type": "ephemeral"}
+        return body
+
+    def test_terminal_output_compaction_default_is_holdout_evidence_only(self):
+        # Default policy: enabled, canary fraction 0.0, holdout 1.0,
+        # keep_recent_turns 0 — every eligible tool-result records a
+        # compact-on-entry projection but traffic is never mutated.
+        body = self._terminal_tool_result_body()
+        crunched, meta = crunch_module._apply_terminal_output_compaction_canary(
+            body, policy_source="local-default", category="tool-result"
+        )
+        self.assertEqual(meta.get("status"), "holdout")
+        self.assertGreater(int(meta.get("planned_saved_tokens") or 0), 1000)
+        self.assertEqual(int(meta.get("target_count") or 0), 1)
+        self.assertNotIn("omitted", str(crunched))
+
+    def test_terminal_output_compaction_cache_guard_blocks_unstable_apply(self):
+        # A cache-bearing request may only be mutated by a compact-on-entry
+        # policy (keep_recent_turns 0) with a session-stable cohort; aged
+        # compaction or per-request cohorts would bust the provider cache.
+        body = self._terminal_tool_result_body(with_cache_control=True)
+        # Trailing turns push the tool_result into the aged window so the
+        # unstable policy actually produces a plan for the guard to block.
+        body["messages"].append({"role": "assistant", "content": [{"type": "text", "text": "build failed, investigating"}]})
+        body["messages"].append({"role": "user", "content": [{"type": "text", "text": "fix it"}]})
+        with patch.dict(
+            crunch_module.TERMINAL_OUTPUT_COMPACTION_POLICY,
+            {
+                "keep_recent_turns": 1,
+                "canary": {
+                    "enabled": True,
+                    "fraction": 1.0,
+                    "holdout_fraction": 0.0,
+                    "salt": "test",
+                    "unit": "request_fingerprint",
+                },
+            },
+        ):
+            crunched, meta = crunch_module._apply_terminal_output_compaction_canary(
+                body, policy_source="local-default", category="tool-result"
+            )
+        self.assertEqual(meta.get("status"), "bypass")
+        self.assertEqual(meta.get("reason"), "prompt-cache-prefix-stability")
+        self.assertNotIn("omitted", str(crunched))
+
+    def test_terminal_output_compaction_entry_mode_applies_on_full_fraction(self):
+        # keep_recent_turns 0 + fraction 1.0 is cache-stable (pure content):
+        # the apply path compacts and preserves error evidence.
+        body = self._terminal_tool_result_body(with_cache_control=True)
+        with patch.dict(
+            crunch_module.TERMINAL_OUTPUT_COMPACTION_POLICY,
+            {
+                "keep_recent_turns": 0,
+                "canary": {
+                    "enabled": True,
+                    "fraction": 1.0,
+                    "holdout_fraction": 0.0,
+                    "salt": "test",
+                    "unit": "request_fingerprint",
+                },
+            },
+        ):
+            crunched, meta = crunch_module._apply_terminal_output_compaction_canary(
+                body, policy_source="local-default", category="tool-result"
+            )
+        self.assertEqual(meta.get("status"), "applied")
+        rendered = str(crunched)
+        self.assertIn("ERROR: undefined symbol foo_bar", rendered)
+        self.assertLess(len(rendered), len(str(self._terminal_tool_result_body())))
+
     def test_old_text_collapse_suppressed_on_prompt_cached_requests(self):
         # Collapsing aged blocks mutates the conversation prefix as blocks
         # leave the recency window, which invalidates the provider prompt

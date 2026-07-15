@@ -238,7 +238,9 @@ class TerminalOutputCompactionCanaryTests(unittest.TestCase):
         self.home.cleanup()
         importlib.reload(crunch_module)
 
-    def test_default_terminal_output_compaction_is_disabled_and_forwards_unchanged(self):
+    def test_default_terminal_output_compaction_is_holdout_evidence_and_forwards_unchanged(self):
+        # Default policy is evidence mode: enabled with canary fraction 0.0 and
+        # holdout 1.0, so projections are recorded but traffic is NEVER mutated.
         manual = importlib.reload(crunch_module)
         body = _tool_result_body("RAW_DEFAULT_SECRET")
 
@@ -246,12 +248,14 @@ class TerminalOutputCompactionCanaryTests(unittest.TestCase):
 
         self.assertEqual(crunched, body)
         terminal_meta = meta["terminal_output_compaction"]
-        self.assertFalse(terminal_meta["enabled"])
-        self.assertEqual(terminal_meta["status"], "skipped")
-        self.assertEqual(terminal_meta["reason"], "disabled")
+        self.assertTrue(terminal_meta["enabled"])
+        self.assertIn(terminal_meta["status"], {"skipped", "holdout"})
+        self.assertNotEqual(terminal_meta["status"], "applied")
         policy = manual.terminal_output_compaction_effective_policy()
         self.assertEqual(policy["rule_count"], 0)
         self.assertEqual(policy["rules"], [])
+        self.assertEqual(float(policy["canary"]["fraction"]), 0.0)
+        self.assertEqual(int(policy["keep_recent_turns"]), 0)
 
     def test_conditional_terminal_output_compaction_policy_reports_sanitized_rules(self):
         with TemporaryDirectory() as tmp:

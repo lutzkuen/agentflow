@@ -203,16 +203,19 @@ terminal_log_boilerplate:
   min_repeated_lines: 4
   max_annotations: 12
 terminal_output_compaction:
-  # Opt-in only. When enabled, TokenClaw can compact older Anthropic
-  # tool_result text that looks like repetitive terminal output before
-  # forwarding. Recent turns, tool protocol IDs, commands, failures, stack
-  # traces, exit status, and file-change evidence are preserved. Default
-  # traffic is holdout-only when an operator enables canary metadata without
-  # raising canary_fraction.
-  enabled: false
+  # Evidence mode: enabled with canary_fraction 0.0 + holdout 1.0, so every
+  # eligible tool_result is PLANNED (metadata-only projection + lifecycle
+  # evidence) but never mutated. keep_recent_turns 0 measures compact-on-entry
+  # — the only prompt-cache-stable mode: compaction must be a pure function of
+  # block content, never of block age (aging mutates the conversation prefix
+  # and busts the provider cache). Tool protocol IDs, commands, failures,
+  # stack traces, exit status, and file-change evidence are preserved.
+  # Before raising canary_fraction on cache-bearing traffic, the cohort unit
+  # must be session-stable (the apply path enforces both invariants).
+  enabled: true
   rule_id: local-terminal-output-compaction-canary
   candidate_id: null
-  keep_recent_turns: 2
+  keep_recent_turns: 0
   min_block_chars: 2000
   head_lines: 12
   tail_lines: 16

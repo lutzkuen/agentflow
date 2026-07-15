@@ -584,13 +584,20 @@ def _default_crunch_policy() -> dict[str, Any]:
             "max_annotations": 12,
         },
         "terminal_output_compaction": {
-            "enabled": False,
+            # Enabled with canary fraction 0.0 + holdout 1.0: every eligible
+            # tool-result is PLANNED (metadata-only projection + lifecycle
+            # evidence) but never mutated. keep_recent_turns=0 measures
+            # compact-on-entry — the only mode that is a pure function of
+            # block content and therefore prompt-cache-stable (a token
+            # compacted at entry saves its cache-write once and a cache-read
+            # every subsequent turn of the session).
+            "enabled": True,
             "rule_id": "local-terminal-output-compaction-canary",
             "candidate_id": None,
             "action_id": None,
             "conditions": {},
             "provenance": None,
-            "keep_recent_turns": TERMINAL_COMPACTION_DEFAULT_KEEP_RECENT_TURNS,
+            "keep_recent_turns": 0,
             "min_block_chars": TERMINAL_COMPACTION_DEFAULT_MIN_BLOCK_CHARS,
             "head_lines": TERMINAL_COMPACTION_DEFAULT_HEAD_LINES,
             "tail_lines": TERMINAL_COMPACTION_DEFAULT_TAIL_LINES,
@@ -6315,7 +6322,14 @@ def _apply_anthropic_thinking_history_compaction_canary(
 def _terminal_output_compaction_action_public(policy: dict[str, Any]) -> dict[str, Any]:
     return {
         "type": "compact_terminal_output",
-        "keep_recent_turns": int(policy.get("keep_recent_turns") or TERMINAL_COMPACTION_DEFAULT_KEEP_RECENT_TURNS),
+        # keep_recent_turns=0 (compact-on-entry) is a valid, cache-stable
+        # value — an `or` fallback would silently coerce it back to the aged
+        # default.
+        "keep_recent_turns": int(
+            TERMINAL_COMPACTION_DEFAULT_KEEP_RECENT_TURNS
+            if policy.get("keep_recent_turns") is None
+            else policy.get("keep_recent_turns")
+        ),
         "min_block_chars": int(policy.get("min_block_chars") or TERMINAL_COMPACTION_DEFAULT_MIN_BLOCK_CHARS),
         "head_lines": int(policy.get("head_lines") or TERMINAL_COMPACTION_DEFAULT_HEAD_LINES),
         "tail_lines": int(policy.get("tail_lines") or TERMINAL_COMPACTION_DEFAULT_TAIL_LINES),
@@ -6348,7 +6362,14 @@ def _terminal_output_compaction_public_policy(
         "action_id": str(policy.get("action_id")) if policy.get("action_id") is not None else None,
         "conditions": _sanitize_terminal_output_compaction_conditions(policy.get("conditions")),
         "provenance": _sanitize_terminal_output_compaction_provenance(policy.get("provenance")),
-        "keep_recent_turns": int(policy.get("keep_recent_turns") or TERMINAL_COMPACTION_DEFAULT_KEEP_RECENT_TURNS),
+        # keep_recent_turns=0 (compact-on-entry) is a valid, cache-stable
+        # value — an `or` fallback would silently coerce it back to the aged
+        # default.
+        "keep_recent_turns": int(
+            TERMINAL_COMPACTION_DEFAULT_KEEP_RECENT_TURNS
+            if policy.get("keep_recent_turns") is None
+            else policy.get("keep_recent_turns")
+        ),
         "min_block_chars": int(policy.get("min_block_chars") or TERMINAL_COMPACTION_DEFAULT_MIN_BLOCK_CHARS),
         "head_lines": int(policy.get("head_lines") or TERMINAL_COMPACTION_DEFAULT_HEAD_LINES),
         "tail_lines": int(policy.get("tail_lines") or TERMINAL_COMPACTION_DEFAULT_TAIL_LINES),
@@ -6910,6 +6931,29 @@ def _apply_terminal_output_compaction_canary(
             "tokens_saved_est": 0,
         })
         return body, meta
+
+    # Prompt-cache prefix stability (same invariant as old_text_collapse):
+    # compaction that depends on block age (keep_recent_turns > 0) mutates the
+    # conversation prefix as blocks age, and a per-request canary cohort can
+    # flip mid-session — either busts the provider prompt cache for the whole
+    # remaining conversation. On cache-bearing requests only compact-on-entry
+    # with a session-stable cohort may mutate.
+    if bool(_anthropic_cache_prefix_boundary(body).get("present")):
+        public = _terminal_output_compaction_public_policy(policy)
+        canary_conf = public.get("canary") or {}
+        fraction = float(canary_conf.get("fraction") or 0.0)
+        unit = str(canary_conf.get("unit") or "")
+        cache_stable = int(public.get("keep_recent_turns") or 0) == 0 and (
+            fraction >= 1.0 or unit == "session"
+        )
+        if not cache_stable:
+            meta.update({
+                "status": "bypass",
+                "reason": "prompt-cache-prefix-stability",
+                "after_chars": before_chars,
+                "tokens_saved_est": 0,
+            })
+            return body, meta
 
     safety_stop = evaluate_terminal_output_compaction_safety_stop(store_obj, policy=policy)
     if safety_stop:
