@@ -104,6 +104,9 @@ terminal_output_compaction:
   keep_recent_turns: 2
   min_block_chars: 500
   min_saved_chars: 100
+  # This fixture suite exercises the thinking blocker explicitly; the shipped
+  # default is now block_thinking: false (evidence mode measures thinking traffic).
+  block_thinking: true
   canary:
     enabled: true
     canary_fraction: {fraction}

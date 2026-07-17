@@ -603,7 +603,11 @@ def _default_crunch_policy() -> dict[str, Any]:
             "tail_lines": TERMINAL_COMPACTION_DEFAULT_TAIL_LINES,
             "max_evidence_lines": TERMINAL_COMPACTION_DEFAULT_MAX_EVIDENCE_LINES,
             "min_saved_chars": TERMINAL_COMPACTION_DEFAULT_MIN_SAVED_CHARS,
-            "block_thinking": True,
+            # Evidence mode must measure the dominant (thinking) traffic;
+            # canary fraction 0.0 already guarantees no mutation. Whether
+            # thinking turns may ever be MUTATED is a separate activation
+            # decision on the projections this collects.
+            "block_thinking": False,
             "canary": {
                 "enabled": True,
                 "fraction": 0.0,

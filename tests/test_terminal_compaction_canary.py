@@ -61,7 +61,14 @@ def _tool_result_body(secret: str, *, thinking: bool = False) -> dict:
     }
 
 
-def _write_rules(config: Path, *, fraction: float, min_samples: int = 5, max_error_rate: float = 0.1) -> None:
+def _write_rules(
+    config: Path,
+    *,
+    fraction: float,
+    min_samples: int = 5,
+    max_error_rate: float = 0.1,
+    block_thinking: bool = False,
+) -> None:
     (config / "crunch_rules.yaml").write_text(
         f"""
 enabled: true
@@ -71,6 +78,7 @@ terminal_output_compaction:
   keep_recent_turns: 2
   min_block_chars: 500
   min_saved_chars: 100
+  block_thinking: {str(block_thinking).lower()}
   canary:
     enabled: true
     canary_fraction: {fraction}
@@ -433,7 +441,7 @@ class TerminalOutputCompactionCanaryTests(unittest.TestCase):
             tmp_path = Path(tmp)
             config = tmp_path / "config"
             config.mkdir()
-            _write_rules(config, fraction=1.0)
+            _write_rules(config, fraction=1.0, block_thinking=True)
             os.chdir(tmp_path)
             manual = importlib.reload(crunch_module)
             body = _tool_result_body("RAW_THINKING_SECRET", thinking=True)

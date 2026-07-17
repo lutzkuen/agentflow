@@ -221,7 +221,8 @@ terminal_output_compaction:
   tail_lines: 16
   max_evidence_lines: 80
   min_saved_chars: 500
-  block_thinking: true
+  # Evidence mode measures thinking traffic too (fraction 0.0 = never mutates).
+  block_thinking: false
   canary:
     enabled: true
     canary_fraction: 0.0
