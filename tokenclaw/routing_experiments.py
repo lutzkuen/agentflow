@@ -2591,7 +2591,13 @@ def turn_difficulty_features(body: Any) -> dict[str, Any]:
     elif thinking.get("type") == "enabled":
         thinking_bucket = "enabled-default"
     else:
-        thinking_bucket = "none"
+        # The thinking dict alone misses effort-based (Mythos-class),
+        # interleaved, and history-carried thinking — the canonical detector
+        # is authoritative (production fable sessions showed uses_thinking
+        # true with a bare body["thinking"]).
+        from tokenclaw.router import uses_thinking as _canonical_uses_thinking
+
+        thinking_bucket = "enabled-other" if _canonical_uses_thinking(body) else "none"
     return {
         "message_count_bucket": message_count_bucket(len(items)),
         "last_tool_result_chars_bucket": last_tool_result_chars_bucket(_last_tool_result_chars(body)),
@@ -2920,6 +2926,12 @@ def routing_experiment_outcome_event(feedback_features: dict[str, Any]) -> dict[
             "functional_similarity": feedback_features.get("functional_similarity"),
             "relaxed_passed": bool(feedback_features.get("relaxed_passed")),
             "similarity_threshold": feedback_features.get("similarity_threshold"),
+            # Turn-difficulty conditioning buckets: the trainer's refined
+            # subgroups key on these, so they must ride the wire outcome (the
+            # feedback-features copy alone never leaves the proxy).
+            "message_count_bucket": feedback_features.get("message_count_bucket"),
+            "last_tool_result_chars_bucket": feedback_features.get("last_tool_result_chars_bucket"),
+            "thinking_bucket": feedback_features.get("thinking_bucket"),
             "latency_delta_ms": feedback_features.get("latency_delta_ms"),
             "cost_delta_usd": feedback_features.get("cost_delta_usd"),
             "routed_cost_delta_usd": feedback_features.get("routed_cost_delta_usd"),

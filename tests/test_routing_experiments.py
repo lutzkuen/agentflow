@@ -1886,3 +1886,25 @@ class ServerIssuedExperimentPolicyPrecedenceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TurnDifficultyWireTests(unittest.TestCase):
+    def test_outcome_event_carries_turn_difficulty_buckets(self):
+        # The trainer's refined subgroups key on these fields server-side; a
+        # hand-picked wire field list silently dropped them once before.
+        event = experiments.routing_experiment_outcome_event({
+            "status": "compared",
+            "relaxed_passed": True,
+            "message_count_bucket": "gte-40",
+            "last_tool_result_chars_bucket": "lt-500",
+            "thinking_bucket": "enabled-other",
+            "requested_model": "claude-fable-5",
+            "shadow_model": "claude-opus-4-8",
+            "provider": "anthropic",
+            "source_surface": "anthropic_messages",
+            "category": "tool-result",
+        })
+        outcome = event["outcome"]
+        self.assertEqual(outcome["message_count_bucket"], "gte-40")
+        self.assertEqual(outcome["last_tool_result_chars_bucket"], "lt-500")
+        self.assertEqual(outcome["thinking_bucket"], "enabled-other")
