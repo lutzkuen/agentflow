@@ -2495,6 +2495,110 @@ def compare_response_outputs(primary_response: dict[str, Any] | None, shadow_res
     }
 
 
+def message_count_bucket(count: Any) -> str:
+    """Bucketed conversation depth — the turn-number learning feature."""
+    try:
+        n = int(count or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n < 5:
+        return "lt-5"
+    if n < 10:
+        return "5-9"
+    if n < 20:
+        return "10-19"
+    if n < 40:
+        return "20-39"
+    return "gte-40"
+
+
+def last_tool_result_chars_bucket(chars: Any) -> str:
+    """Bucketed size of the newest tool result — the constrained-turn signal."""
+    if chars is None:
+        return "none"
+    try:
+        n = int(chars)
+    except (TypeError, ValueError):
+        return "none"
+    if n < 500:
+        return "lt-500"
+    if n < 2000:
+        return "500-2k"
+    if n < 8000:
+        return "2k-8k"
+    return "gte-8k"
+
+
+def _last_tool_result_chars(body: Any) -> int | None:
+    """Char size of the most recent tool result in the request, if any."""
+    if not isinstance(body, dict):
+        return None
+    items = body.get("messages")
+    if not isinstance(items, list):
+        items = body.get("input")
+    if not isinstance(items, list):
+        return None
+
+    def block_chars(value: Any) -> int:
+        if isinstance(value, str):
+            return len(value)
+        if isinstance(value, list):
+            return sum(block_chars(item) for item in value)
+        if isinstance(value, dict):
+            if isinstance(value.get("text"), str):
+                return len(value["text"])
+            return block_chars(value.get("content"))
+        return 0
+
+    for item in reversed(items):
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "function_call_output":
+            output = item.get("output")
+            return len(output) if isinstance(output, str) else block_chars(output)
+        content = item.get("content")
+        if isinstance(content, list):
+            for block in reversed(content):
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    return block_chars(block.get("content"))
+    return None
+
+
+def turn_difficulty_features(body: Any) -> dict[str, Any]:
+    """Bucketed, content-free turn-difficulty signals for routing evidence.
+
+    Per-turn equivalence between model tiers varies with how constrained the
+    turn is (fair fable->opus evidence: 0.71 relaxed on single-tool-call turns
+    vs 0.27 on multi-call turns), so shadow outcomes carry these features and
+    the trainer can condition rules on them instead of averaging over all
+    turns. Everything here is a bucket, count, or flag — never content.
+    """
+    if not isinstance(body, dict):
+        return {}
+    items = body.get("messages")
+    if not isinstance(items, list):
+        items = body.get("input") if isinstance(body.get("input"), list) else []
+    thinking = body.get("thinking") if isinstance(body.get("thinking"), dict) else {}
+    effort = str(thinking.get("effort") or "").strip().lower()
+    try:
+        budget = int(thinking.get("budget_tokens") or 0)
+    except (TypeError, ValueError):
+        budget = 0
+    if effort in {"low", "medium", "high"}:
+        thinking_bucket = f"effort-{effort}"
+    elif budget > 0:
+        thinking_bucket = "budget-lt-4k" if budget < 4000 else "budget-gte-4k"
+    elif thinking.get("type") == "enabled":
+        thinking_bucket = "enabled-default"
+    else:
+        thinking_bucket = "none"
+    return {
+        "message_count_bucket": message_count_bucket(len(items)),
+        "last_tool_result_chars_bucket": last_tool_result_chars_bucket(_last_tool_result_chars(body)),
+        "thinking_bucket": thinking_bucket,
+    }
+
+
 def _text_chars_bucket(text_chars: Any) -> str:
     try:
         chars = int(text_chars or 0)
@@ -2585,6 +2689,7 @@ def routing_experiment_feedback_features(
     shadow_routed_cost_est_usd: float | None = None,
     error: str | None = None,
     shadow_http_error_detail: str | None = None,
+    turn_difficulty: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     category = str(routing_meta.get("category") or experiment_meta.get("category") or "unknown")
     requested_model = str(experiment_meta.get("requested_model") or routing_meta.get("requested_model") or "")
@@ -2703,6 +2808,12 @@ def routing_experiment_feedback_features(
         "shadow_stop_reason": comparison.get("shadow_stop_reason"),
         "primary_tool_call_count": comparison.get("primary_tool_call_count"),
         "shadow_tool_call_count": comparison.get("shadow_tool_call_count"),
+        # Turn-difficulty conditioning features (buckets only): let the trainer
+        # find the constrained-turn pockets where per-turn equivalence is high
+        # instead of averaging over the whole category.
+        "message_count_bucket": (turn_difficulty or {}).get("message_count_bucket"),
+        "last_tool_result_chars_bucket": (turn_difficulty or {}).get("last_tool_result_chars_bucket"),
+        "thinking_bucket": (turn_difficulty or {}).get("thinking_bucket"),
         "similarity_threshold": experiment_meta.get("similarity_threshold"),
         "passed_threshold": bool(comparison.get("passed_threshold")),
         "reason_codes": reason_codes,

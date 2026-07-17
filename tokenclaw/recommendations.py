@@ -36,7 +36,13 @@ from tokenclaw.pricing import codex_app_model, codex_app_processing_mode, estima
 from tokenclaw.prompt_features import PROMPT_DIFFICULTY_FEATURE_SCHEMA
 from tokenclaw.quality import derive_codex_turn_quality_signals, derive_provider_quality_signals
 from tokenclaw.store import stable_json, utc_now
-from tokenclaw.routing_experiments import _public_label, routing_pathway_policy_decision
+from tokenclaw.routing_experiments import (
+    _public_label,
+    last_tool_result_chars_bucket,
+    message_count_bucket,
+    routing_pathway_policy_decision,
+    turn_difficulty_features,
+)
 from tokenclaw.terminal_features import TERMINAL_LOG_FEATURE_SCHEMA
 
 
@@ -355,6 +361,7 @@ def build_request_facts_envelope(
     if token_estimate is None and text_chars > 0:
         token_estimate = max(1, text_chars // TOKEN_CHARS)
     counts = _message_item_counts(raw_body)
+    _turn_difficulty = turn_difficulty_features(raw_body)
     tool_facts = _tool_fact_counts(raw_body)
     capabilities = dict(local_executor_capabilities or {})
     capabilities.setdefault("schema", "tokenclaw.local_executor_capabilities.v1")
@@ -386,6 +393,12 @@ def build_request_facts_envelope(
         "category": _public_label(category, fallback="") or None,
         "workflow_phase": _public_label(workflow_phase, fallback="") or None,
         "uses_thinking": _request_uses_thinking(raw_body),
+        # Turn-difficulty conditioning features, mirrored on the shadow-outcome
+        # records: rules conditioned on them server-side must be evaluable
+        # against live decisions or they can never match traffic.
+        "message_count_bucket": message_count_bucket(counts["message_item_count"] or counts["input_item_count"]),
+        "last_tool_result_chars_bucket": _turn_difficulty.get("last_tool_result_chars_bucket"),
+        "thinking_bucket": _turn_difficulty.get("thinking_bucket"),
         # Bucketed/enum-only difficulty signals (task_intent, downgrade_risk,
         # multi-step likelihood, ...) computed locally from text that never leaves
         # the proxy. Prime training features for the routing predictor.

@@ -67,6 +67,7 @@ from tokenclaw.routing_experiments import (
     routing_experiment_outcome_event,
     routing_experiment_feedback_features,
     routing_experiment_decision,
+    turn_difficulty_features,
     _public_label as _public_metadata_label,
     _today_shadow_spend_usd,
 )
@@ -1568,6 +1569,7 @@ async def _run_anthropic_routing_experiment(
         shadow_routed_cost_est_usd=shadow_routed_cost,
         error=error,
         shadow_http_error_detail=shadow_http_error_detail,
+        turn_difficulty=turn_difficulty_features(request_body),
     )
     experiment_meta.update(
         {
