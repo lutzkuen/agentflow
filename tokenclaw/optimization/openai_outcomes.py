@@ -91,6 +91,19 @@ async def record_managed_outcome_feedback(
     store_obj = store if store is not None else getattr(context, "store", None)
     if store_obj is None:
         raise ValueError("record_managed_outcome_feedback requires a store or context with a store")
+    # Boundary firewall (CLAUDE.md "local applies / server learns"): a decided
+    # local downroute moved the model to a cheaper tier AFTER the managed server
+    # made its decision. Every server-bound lifecycle event below embeds
+    # routed_model (= the downrouted target for these calls); reporting it would
+    # teach the server a false model->outcome pair for a unit it built against the
+    # requested model. Suppress the whole managed feedback and persist only the
+    # local routing_meta, whose "downroute" sub-object drives the deferred local
+    # harm-verdict pass. Mirrors anthropic_proxy._record_managed_outcome_feedback.
+    downroute_section = routing_meta.get("downroute")
+    if isinstance(downroute_section, dict) and downroute_section.get("decided"):
+        if hasattr(store_obj, "update_call_routing_json"):
+            store_obj.update_call_routing_json(call_id, stable_json(routing_meta))
+        return
     lifecycle = build_openai_optimization_lifecycle_event(
         routing_meta=routing_meta,
         crunch_meta=crunch_meta,

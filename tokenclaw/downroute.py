@@ -22,6 +22,7 @@ off. See CLAUDE.md "Calibrated local dials".
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import random
@@ -48,6 +49,11 @@ READ_ONLY_TOOLS = frozenset(
         "webfetch",
         "websearch",
         "todoread",
+        # OpenAI Responses built-in read-only tools, normalized from their
+        # "*_call" item types (web_search_call -> web_search) so they match here.
+        "web_search",
+        "web_search_preview",
+        "file_search",
     }
 )
 
@@ -81,28 +87,74 @@ def _iter_content_blocks(content: Any) -> Iterable[dict]:
                 yield block
 
 
-def recent_tool_use_names(body: Any) -> list[str]:
-    """Lowercased tool_use names from the most recent assistant message that has
-    any. Returns [] when no assistant turn in the transcript issued a tool call.
+def _assistant_tool_names(msg: dict) -> list[str]:
+    """Lowercased tool names emitted by one assistant message, across both the
+    Anthropic ``content[].tool_use`` shape and the OpenAI chat/completions
+    ``tool_calls[].function.name`` shape."""
+    names: list[str] = []
+    for block in _iter_content_blocks(msg.get("content")):
+        if block.get("type") == "tool_use" and block.get("name"):
+            names.append(str(block.get("name")).lower())
+    tool_calls = msg.get("tool_calls")
+    if isinstance(tool_calls, list):
+        for tc in tool_calls:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function")
+            name = fn.get("name") if isinstance(fn, dict) else tc.get("name")
+            if name:
+                names.append(str(name).lower())
+    return names
 
-    We read *actual* tool_use blocks, not the declared ``tools`` array. The
-    declared array is a surface/config fingerprint (it clusters at 0 / 28 / ~100
-    by MCP-server count and is constant per surface); it says nothing about what
+
+def _openai_responses_tool_names(input_items: list) -> list[str]:
+    """Tool names from the current turn's activity in an OpenAI Responses
+    ``input`` list. Scans in reverse, collecting ``function_call`` names and
+    normalized built-in ``*_call`` item types (``web_search_call`` ->
+    ``web_search``), and stops at the most recent user message so only this
+    turn's tool activity counts. Unknown ``*_call`` types (e.g. ``computer_call``)
+    are kept verbatim so the read-only test fails closed on them."""
+    names: list[str] = []
+    for item in reversed(input_items):
+        if not isinstance(item, dict):
+            continue
+        itype = item.get("type")
+        if itype == "message" and item.get("role") == "user":
+            break
+        if itype == "function_call":
+            name = item.get("name")
+            if name:
+                names.append(str(name).lower())
+        elif isinstance(itype, str) and itype.endswith("_call"):
+            names.append(itype[: -len("_call")].lower())
+    names.reverse()
+    return names
+
+
+def recent_tool_use_names(body: Any) -> list[str]:
+    """Lowercased tool_use names from the most recent assistant tool activity.
+    Returns [] when no assistant turn in the transcript issued a tool call.
+    Handles all three provider request shapes: Anthropic ``messages`` (tool_use
+    content blocks), OpenAI chat/completions ``messages`` (assistant
+    ``tool_calls``), and the OpenAI Responses flat ``input`` list.
+
+    We read *actual* tool calls, not the declared ``tools`` array. The declared
+    array is a surface/config fingerprint (it clusters at 0 / 28 / ~100 by
+    MCP-server count and is constant per surface); it says nothing about what
     this turn is doing. The names the model actually emitted do.
     """
     if not isinstance(body, dict):
         return []
+    input_items = body.get("input")
+    if isinstance(input_items, list):
+        return _openai_responses_tool_names(input_items)
     messages = body.get("messages")
     if not isinstance(messages, list):
         return []
     for msg in reversed(messages):
         if not isinstance(msg, dict) or msg.get("role") != "assistant":
             continue
-        names = [
-            str(block.get("name")).lower()
-            for block in _iter_content_blocks(msg.get("content"))
-            if block.get("type") == "tool_use" and block.get("name")
-        ]
+        names = _assistant_tool_names(msg)
         if names:
             return names
     return []
@@ -131,17 +183,60 @@ def classify_eligibility(body: Any, category: Optional[str], cfg: "DownrouteConf
 
 # --- Pockets: requested-family -> target-family -----------------------------
 
-# Cross-provider routing is deliberately out of scope; these are Anthropic tiers
-# only. OpenAI terra->luna is a deferred candidate, intentionally absent.
+# cache._model_family collapses every gpt-5.x tier to a single "gpt-5", which
+# would make an OpenAI pocket a no-op self-swap (gpt-5 -> gpt-5). Downrouting
+# needs the fine-grained ladder tier instead. These tokens map an OpenAI model
+# string to its ladder tier; Codex is deliberately excluded (it is an action
+# lane and fails closed on tool names anyway, and its family stays "codex").
+_OPENAI_TIER_TOKENS = ("sol", "terra", "luna")
+
+
+def _openai_tier(model: str | None) -> Optional[str]:
+    """Fine-grained OpenAI ladder tier (sol/terra/luna/mini) for a model string,
+    else None for non-OpenAI or Codex models. Bare current-gen ``gpt-5.6`` (no
+    tier suffix) is the flagship, treated as ``sol`` — its adjacent-down is
+    terra, matching routing_experiments._suggest_adjacent_routed_model."""
+    if not model:
+        return None
+    m = str(model).lower()
+    if "gpt-5" not in m:
+        return None
+    if "codex" in m:
+        return None
+    if "mini" in m or "nano" in m:
+        return "mini"
+    for tok in _OPENAI_TIER_TOKENS:
+        if tok in m:
+            return tok
+    if "gpt-5.6" in m:
+        return "sol"
+    return None
+
+
+def _downroute_family(model: str | None) -> Optional[str]:
+    """Tier-aware family for downrouting. For OpenAI models this returns the
+    ladder tier so gpt-5.6-terra and gpt-5.6-luna are DISTINCT pockets. For
+    Anthropic models ``_openai_tier`` returns None, so this is byte-identical to
+    ``_model_family`` and the committed Anthropic path is unchanged."""
+    return _openai_tier(model) or _model_family(model)
+
+
+# Cross-provider routing is deliberately out of scope; each pocket stays within
+# one provider's ladder. OpenAI rungs mirror routing_experiments.
+# _suggest_adjacent_routed_model: sol -> terra -> luna -> mini (rock bottom).
+# "mini"/"haiku" have no entry: they are the floor and never downroute further.
 POCKET_TARGET_FAMILY = {
     "opus": "sonnet",
     "sonnet": "haiku",
+    "sol": "terra",
+    "terra": "luna",
+    "luna": "mini",
 }
 
 
 def pocket_for(requested_model: str | None) -> Optional[tuple[str, str]]:
     """(requested_family, target_family) for a downroute-eligible model, else None."""
-    fam = _model_family(requested_model)
+    fam = _downroute_family(requested_model)
     if not fam:
         return None
     target = POCKET_TARGET_FAMILY.get(fam)
@@ -268,18 +363,77 @@ def _response_content(response_json: Any) -> Any:
     return None
 
 
+def _collect_target_args(inp: dict, targets: set[str]) -> None:
+    for key in _TARGET_ARG_KEYS:
+        value = inp.get(key)
+        if isinstance(value, str) and value.strip():
+            targets.add(f"{key}={value.strip()}")
+
+
+def _loads_arguments(arguments: Any) -> Optional[dict]:
+    """OpenAI tool-call arguments arrive as a JSON *string*. Parse defensively;
+    a non-string or malformed payload yields no targets (fail closed)."""
+    if isinstance(arguments, dict):
+        return arguments
+    if not isinstance(arguments, str) or not arguments.strip():
+        return None
+    try:
+        parsed = json.loads(arguments)
+    except (ValueError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _openai_targets_from_output_items(items: Any, targets: set[str]) -> None:
+    """OpenAI Responses: output[] ``*_call`` items whose ``arguments`` is a JSON
+    string. Built-in calls (web_search_call, ...) carry no _TARGET_ARG_KEYS and
+    simply contribute nothing."""
+    if not isinstance(items, list):
+        return
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        itype = item.get("type")
+        if not (isinstance(itype, str) and itype.endswith("_call")):
+            continue
+        inp = _loads_arguments(item.get("arguments"))
+        if inp:
+            _collect_target_args(inp, targets)
+
+
+def _openai_targets_from_tool_calls(tool_calls: Any, targets: set[str]) -> None:
+    """OpenAI chat/completions: choices[].message.tool_calls[].function.arguments
+    (a JSON string)."""
+    if not isinstance(tool_calls, list):
+        return
+    for tc in tool_calls:
+        if not isinstance(tc, dict):
+            continue
+        fn = tc.get("function")
+        arguments = fn.get("arguments") if isinstance(fn, dict) else tc.get("arguments")
+        inp = _loads_arguments(arguments)
+        if inp:
+            _collect_target_args(inp, targets)
+
+
 def extract_tool_targets(response_json: Any) -> set[str]:
-    """Normalized ``key=value`` target strings from the tool_use blocks a
-    response emitted. Empty set when the response issued no tool call."""
+    """Normalized ``key=value`` target strings from the tool calls a response
+    emitted, across all provider response shapes (Anthropic ``content[].tool_use``,
+    OpenAI Responses ``output[]``, OpenAI chat ``choices[].message.tool_calls``).
+    Empty set when the response issued no tool call. Two turns hitting the same
+    target within the repair window is the harm signal the finalize pass reads."""
     targets: set[str] = set()
     for block in _tool_use_blocks(_response_content(response_json)):
         inp = block.get("input")
-        if not isinstance(inp, dict):
-            continue
-        for key in _TARGET_ARG_KEYS:
-            value = inp.get(key)
-            if isinstance(value, str) and value.strip():
-                targets.add(f"{key}={value.strip()}")
+        if isinstance(inp, dict):
+            _collect_target_args(inp, targets)
+    if isinstance(response_json, dict):
+        _openai_targets_from_output_items(response_json.get("output"), targets)
+        choices = response_json.get("choices")
+        if isinstance(choices, list):
+            for choice in choices:
+                if isinstance(choice, dict) and isinstance(choice.get("message"), dict):
+                    _openai_targets_from_tool_calls(choice["message"].get("tool_calls"), targets)
     return targets
 
 

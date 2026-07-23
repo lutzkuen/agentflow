@@ -1558,7 +1558,6 @@ class SQLiteStore:
         window) and, when the controller is enabled, drive one AIMD step.
         """
         from . import downroute as _dr
-        from .cache import _model_family
 
         def _loads_any(value: Any) -> Any:
             if value is None or value == "":
@@ -1645,7 +1644,7 @@ class SQLiteStore:
                             (row["session_id"], row["id"], row["created_at"], deadline, window_turns),
                         ).fetchall()
                         for follower in followers:
-                            if _model_family(follower["routed_model"]) != requested_family:
+                            if _dr._downroute_family(follower["routed_model"]) != requested_family:
                                 continue  # only a frontier redo counts as repair
                             if _dr.extract_tool_targets(_loads_any(follower["response_json"])) & own_targets:
                                 repair_harm = True

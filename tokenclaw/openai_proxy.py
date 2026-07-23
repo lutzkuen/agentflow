@@ -85,12 +85,137 @@ from tokenclaw.routing_experiments import (
     routing_experiment_outcome_event,
 )
 from tokenclaw.router import extract_text, has_tools
+from tokenclaw.downroute import (
+    DownrouteConfig, classify_eligibility, decide_downroute,
+    pocket_for, pocket_key, resolve_target_model,
+)
 from tokenclaw.store import stable_json, utc_now
 from tokenclaw.upstream_url import join_openai_upstream_url, openai_websocket_url
 
 
 SESSION_COST_ALERT_USD = float(os.getenv("TOKENCLAW_SESSION_COST_ALERT_USD", "5.0"))
 OPENAI_REALTIME_EXTRA_HINT = "python -m pip install 'tokenclaw[openai-realtime]'"
+
+# Downrouting config is read once at import (like the crunch/cache policies). The
+# OpenAI proxy carries its own parallel copy of the dial machinery rather than
+# importing anthropic_proxy's, so the two provider paths stay independent and the
+# committed Anthropic seam is untouched. Per-pocket arming lives in the store,
+# picked up live via the short f-cache below.
+_DOWNROUTE_CONFIG = DownrouteConfig.from_env()
+# Ladder tier -> concrete OpenAI model, the same rungs
+# routing_experiments._suggest_adjacent_routed_model walks. downroute._downroute_family
+# returns the tier (sol/terra/luna/mini) as the pocket family, so target_family here
+# is a tier name and resolves to its serving model. Cross-provider routing is out of
+# scope, so this map is OpenAI-only.
+_OPENAI_DOWNROUTE_TIER_MAP = {
+    "sol": "gpt-5.6-sol",
+    "terra": "gpt-5.6-terra",
+    "luna": "gpt-5.6-luna",
+    "mini": "gpt-5-mini",
+}
+# pocket_key -> (f, expires_monotonic); a few-second TTL keeps the shipped-but-
+# unarmed hot path free of per-request SQLite reads once f=0 is cached, while
+# operator arming still takes effect within the TTL.
+_OPENAI_DOWNROUTE_F_CACHE: dict[str, tuple[float, float]] = {}
+_OPENAI_DOWNROUTE_F_CACHE_TTL_SECONDS = 5.0
+
+
+def _openai_cached_pocket_f(store_obj: Any, pocket: str, default: float) -> float:
+    now = time.monotonic()
+    cached = _OPENAI_DOWNROUTE_F_CACHE.get(pocket)
+    if cached is not None and cached[1] > now:
+        return cached[0]
+    try:
+        f = float(store_obj.get_downroute_pocket_f(pocket, default))
+    except Exception:
+        f = float(default)
+    _OPENAI_DOWNROUTE_F_CACHE[pocket] = (f, now + _OPENAI_DOWNROUTE_F_CACHE_TTL_SECONDS)
+    return f
+
+
+def _maybe_apply_openai_downroute(
+    *,
+    store_obj: Any,
+    raw_body: dict[str, Any],
+    crunched: dict[str, Any],
+    routing_meta: dict[str, Any],
+    category: Optional[str],
+    session_id: str | None,
+    call_id: str,
+    resolved_requested_model: Any,
+    sampled_shadow_pass_through: bool,
+    input_tokens: int,
+    cfg: DownrouteConfig = _DOWNROUTE_CONFIG,
+) -> None:
+    """Lowest-priority local dial for OpenAI: probabilistically downroute a
+    read-only tool-heavy turn to a cheaper OpenAI ladder tier.
+
+    Parallels anthropic_proxy._maybe_apply_downroute exactly (fires only on a
+    genuine passthrough, never on a sampled shadow pass-through, stamps
+    ``routing_meta["downroute"]`` for the deferred store finalize pass) with the
+    OpenAI tier->model map. Cross-provider routing is out of scope; a gpt-5.x
+    turn can only step to a cheaper gpt-5.x tier. Read-only classification fails
+    closed on custom function tools whose names we cannot vouch for.
+    """
+    if sampled_shadow_pass_through:
+        return
+    if str(crunched.get("model") or "") != str(resolved_requested_model):
+        return
+    pocket = pocket_for(resolved_requested_model)
+    if pocket is None:
+        return
+    req_family, target_family = pocket
+    key = pocket_key(req_family, target_family)
+    elig = classify_eligibility(raw_body, category, cfg)
+    if not elig.eligible:
+        return
+    f = _openai_cached_pocket_f(store_obj, key, cfg.f_default)
+    if f <= 0.0:
+        routing_meta["downroute"] = {
+            "pocket": key, "from": req_family, "to": target_family,
+            "eligible": True, "f": 0.0, "decided": False, "reason": "pocket-unarmed",
+        }
+        return
+    try:
+        store_obj.note_downroute_pocket_eligible(
+            pocket=key, requested_family=req_family,
+            target_family=target_family, default_f=cfg.f_default,
+        )
+    except Exception:
+        pass
+    if not decide_downroute(session_id=session_id, call_id=call_id, f=f):
+        routing_meta["downroute"] = {
+            "pocket": key, "from": req_family, "to": target_family,
+            "eligible": True, "f": f, "decided": False, "reason": "coin-flip-kept",
+        }
+        return
+    target_model = resolve_target_model(target_family, _OPENAI_DOWNROUTE_TIER_MAP)
+    if not target_model:
+        routing_meta["downroute"] = {
+            "pocket": key, "from": req_family, "to": target_family,
+            "eligible": True, "f": f, "decided": False, "reason": "no-target-model",
+        }
+        return
+    crunched["model"] = target_model
+    routing_meta["routed_model"] = target_model
+    routing_meta["downroute"] = {
+        "pocket": key, "from": req_family, "to": target_family,
+        "eligible": True, "f": f, "decided": True, "target_model": target_model,
+        "reason": elig.reason, "tool_names": list(elig.tool_names),
+        "input_tokens": input_tokens,
+    }
+    # Routing does not crunch: the token count is invariant across a downroute.
+    # Log tokens (the CLAUDE.md metric) plus the estimated input-cost delta the
+    # dial's evidence accrues on.
+    cost_before = estimate_cost(str(resolved_requested_model), input_tokens, 0, provider="openai") or 0.0
+    cost_after = estimate_cost(target_model, input_tokens, 0, provider="openai") or 0.0
+    print(
+        f"downroute: pocket={key} from={resolved_requested_model} to={target_model} "
+        f"f={f:.3f} tokens_before={input_tokens} tokens_after={input_tokens} "
+        f"est_input_cost_delta_usd={cost_after - cost_before:.6f}",
+        flush=True,
+    )
+
 _PUBLIC_ERROR_MARKERS = (
     "authorization",
     "api_key",
@@ -877,6 +1002,29 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
             store_obj=context.store,
         )
         routing_meta["routing_experiment"] = experiment_meta
+
+        # Lowest-priority local dial: only fires on a genuine passthrough (nothing
+        # above — local rules, managed recommendation, session tier, experiment —
+        # moved the model off the requested one) and never on a sampled shadow
+        # pass-through. Placed before the stream/non-stream split so both forward
+        # paths pick up a downrouted crunched["model"].
+        sampled_shadow_pass_through = (
+            isinstance(experiment_meta, dict)
+            and experiment_meta.get("mode") == "shadow_candidate_pass_through"
+            and bool(experiment_meta.get("sampled"))
+        )
+        _maybe_apply_openai_downroute(
+            store_obj=context.store,
+            raw_body=raw_body,
+            crunched=crunched,
+            routing_meta=routing_meta,
+            category=category,
+            session_id=session_id,
+            call_id=call_id,
+            resolved_requested_model=resolved_requested_model,
+            sampled_shadow_pass_through=sampled_shadow_pass_through,
+            input_tokens=input_tokens,
+        )
 
         if stream:
             async def gen() -> AsyncIterator[bytes]:
