@@ -187,6 +187,47 @@ class CrunchRulesTest(unittest.TestCase):
         self.assertNotIn("/workspace/private", rendered)
         self.assertNotIn("old-tool-id", rendered)
 
+    def test_collect_server_features_false_keeps_body_identical(self):
+        # The latency-sensitive forward path runs crunch with
+        # collect_server_features=False. It must produce a byte-for-byte identical
+        # crunched body (apply_local_crunch only needs detections) while skipping the
+        # per-module server feature bundle, which is computed off-path for telemetry.
+        manual = importlib.reload(crunch_module)
+
+        def payload(line_offset: int, *, edit: bool = False) -> str:
+            lines = []
+            for index in range(260):
+                value = "edited-value" if edit and index == 120 else "stable-value"
+                lines.append(f"{index + line_offset}: module_{index} yields {value} repeated context")
+            return "\n".join(lines)
+
+        def make_body():
+            return {
+                "model": "claude-sonnet-4-6",
+                "messages": [
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "old", "content": payload(1)}]},
+                    {"role": "assistant", "content": [{"type": "text", "text": "old response"}]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "new", "content": payload(21, edit=True)}]},
+                    {"role": "user", "content": "recent instruction"},
+                ],
+            }
+
+        common = dict(provider="anthropic", source_surface="anthropic_messages", endpoint="messages")
+        full_body, full_meta = manual.crunch_body(make_body(), **common)
+        fast_body, fast_meta = manual.crunch_body(make_body(), collect_server_features=False, **common)
+
+        self.assertEqual(stable_json(fast_body), stable_json(full_body))
+        self.assertEqual(fast_meta["near_duplicate_tool_blocks_removed"], full_meta["near_duplicate_tool_blocks_removed"])
+        # full path emits per-module server features; fast path defers them
+        self.assertGreater(full_meta["pattern_modules"]["features_emitted_count"], 0)
+        self.assertEqual(fast_meta["pattern_modules"]["features_emitted_count"], 0)
+
+        # The off-path telemetry helper still yields the full feature bundle.
+        deferred = manual.compute_pattern_module_server_features(make_body())
+        self.assertEqual(
+            deferred["features_emitted_count"], full_meta["pattern_modules"]["features_emitted_count"]
+        )
+
     def test_near_duplicate_tool_result_blocks_preserve_recent_turns(self):
         manual = importlib.reload(crunch_module)
         payload = "\n".join(f"{index}: repeated recent tool output row value" for index in range(400))

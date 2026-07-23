@@ -7199,6 +7199,34 @@ async def maybe_summarize_old_context(
     return summarized, meta
 
 
+def compute_pattern_module_server_features(
+    body: dict[str, Any],
+    *,
+    managed_profile: dict[str, Any] | None = None,
+    category: str | None = None,
+) -> dict[str, Any]:
+    """Compute the pattern-module server feature bundle without mutating anything.
+
+    This is the telemetry half of ``crunch_body``'s pattern-module step, split out so
+    it can run off the request path. ``apply_local_crunch=False`` means it only detects
+    and extracts features (no body mutation, no store side effects), so it is safe to
+    call after the forward crunch has already applied its rules on the request path.
+    """
+    policy_source = str((managed_profile or {}).get("policy_source") or CRUNCH_POLICY_SOURCE)
+    if category is None:
+        category = _crunch_request_category(body) if isinstance(body, dict) else None
+    _body, meta = evaluate_pattern_modules(
+        body,
+        module_settings=PATTERN_MODULES_POLICY,
+        apply_local_crunch=False,
+        policy_source=policy_source,
+        rule_path=CRUNCH_RULES_PATH,
+        category=category,
+        collect_server_features=True,
+    )
+    return meta
+
+
 def crunch_body(
     body: dict[str, Any],
     *,
@@ -7208,6 +7236,7 @@ def crunch_body(
     provider: str | None = None,
     source_surface: str | None = None,
     endpoint: str | None = None,
+    collect_server_features: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Conservative request cruncher.
 
@@ -7304,6 +7333,7 @@ def crunch_body(
         policy_source=policy_source,
         rule_path=CRUNCH_RULES_PATH,
         category=category,
+        collect_server_features=collect_server_features,
     )
     new_body, instruction_dedup_meta = _apply_instruction_section_deduplication(
         new_body,

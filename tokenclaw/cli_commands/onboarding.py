@@ -803,6 +803,131 @@ def _write_activation_config_error(stderr: Any, exc: Exception, *, command: str)
         )
 
 
+def _resolve_downroute_pocket(raw: str) -> tuple[str, str, str] | None:
+    """(pocket_key, requested_family, target_family) from operator input, which
+    may be a requested family ("opus") or the full key ("opus->sonnet"). None
+    when it does not name a canonical pocket. We do not route the input through
+    _model_family here: "opus->sonnet" contains "sonnet", so family detection
+    would mis-parse the full key — we split on "->" explicitly instead."""
+    from tokenclaw import downroute
+
+    text = str(raw or "").strip().lower()
+    if not text:
+        return None
+    if "->" in text:
+        req, _, tgt = text.partition("->")
+        req, tgt = req.strip(), tgt.strip()
+    else:
+        req, tgt = text, downroute.POCKET_TARGET_FAMILY.get(text, "")
+    if not req or not tgt or downroute.POCKET_TARGET_FAMILY.get(req) != tgt:
+        return None
+    return (downroute.pocket_key(req, tgt), req, tgt)
+
+
+def _downroute_known_pockets() -> list[str]:
+    from tokenclaw import downroute
+
+    return [downroute.pocket_key(req, tgt) for req, tgt in downroute.POCKET_TARGET_FAMILY.items()]
+
+
+def _downroute_pocket_view(row: dict[str, Any]) -> dict[str, Any]:
+    f = float(row.get("f") or 0.0)
+    return {
+        "pocket": row.get("pocket"),
+        "requested_family": row.get("requested_family"),
+        "target_family": row.get("target_family"),
+        "f": f,
+        "armed": bool(row.get("armed_at")) and f > 0.0,
+        "eligible_count": int(row.get("eligible_count") or 0),
+        "applied_count": int(row.get("applied_count") or 0),
+        "clean_count": int(row.get("clean_count") or 0),
+        "harm_count": int(row.get("harm_count") or 0),
+        "harm_error_count": int(row.get("harm_error_count") or 0),
+        "harm_repair_count": int(row.get("harm_repair_count") or 0),
+        "last_action": row.get("last_action"),
+        "armed_at": row.get("armed_at"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+def _downroute_status_result(rows: list[dict[str, Any]], *, controller_enabled: bool) -> dict[str, Any]:
+    """Overlay stored pocket rows onto the canonical pocket map so status always
+    lists every armable pocket, even ones an operator has never touched (f=0)."""
+    from tokenclaw import downroute
+
+    by_pocket = {str(r.get("pocket")): r for r in rows}
+    pockets: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for req, tgt in downroute.POCKET_TARGET_FAMILY.items():
+        key = downroute.pocket_key(req, tgt)
+        seen.add(key)
+        row = by_pocket.get(key)
+        if row is None:
+            pockets.append(
+                {
+                    "pocket": key,
+                    "requested_family": req,
+                    "target_family": tgt,
+                    "f": 0.0,
+                    "armed": False,
+                    "eligible_count": 0,
+                    "applied_count": 0,
+                    "clean_count": 0,
+                    "harm_count": 0,
+                    "harm_error_count": 0,
+                    "harm_repair_count": 0,
+                    "last_action": None,
+                    "armed_at": None,
+                    "updated_at": None,
+                }
+            )
+        else:
+            pockets.append(_downroute_pocket_view(row))
+    for key, row in by_pocket.items():
+        if key not in seen:
+            pockets.append(_downroute_pocket_view(row))
+    return {
+        "ok": True,
+        "schema": "tokenclaw.downroute_status.v1",
+        "controller_enabled": controller_enabled,
+        "pockets": pockets,
+    }
+
+
+def _write_downroute_status_summary(stdout: Any, result: dict[str, Any], *, brand: str) -> None:
+    controller = "on" if result.get("controller_enabled") else "off"
+    stdout.write(f"{brand} downroute pockets (controller={controller}):\n")
+    pockets = result.get("pockets") or []
+    for p in pockets:
+        applied = int(p.get("applied_count") or 0)
+        harm = int(p.get("harm_count") or 0)
+        harm_rate = f"{(harm / applied):.3f}" if applied else "n/a"
+        state = "ARMED" if p.get("armed") else "off"
+        stdout.write(
+            f"  {str(p.get('pocket')):<16} {state:<5} f={float(p.get('f') or 0.0):.3f} "
+            f"applied={applied} clean={int(p.get('clean_count') or 0)} "
+            f"harm={harm}(err={int(p.get('harm_error_count') or 0)}/rep={int(p.get('harm_repair_count') or 0)}) "
+            f"harm_rate={harm_rate}\n"
+        )
+    if not pockets:
+        stdout.write("  (no pockets)\n")
+
+
+def _write_downroute_pocket_action_summary(stdout: Any, result: dict[str, Any], *, brand: str) -> None:
+    p = result.get("pocket") or {}
+    controller = "on" if result.get("controller_enabled") else "off"
+    state = "ARMED" if p.get("armed") else "off"
+    stdout.write(
+        f"{brand} downroute {result.get('command')}: {p.get('pocket')} -> "
+        f"{state} f={float(p.get('f') or 0.0):.3f} (controller={controller})\n"
+    )
+    if p.get("armed") and controller == "off":
+        stdout.write(
+            "  Controller is off: f holds at this value until you change it "
+            "(set TOKENCLAW_DOWNROUTE_CONTROLLER=1 to auto-tune within [f_min, f_max]).\n"
+        )
+
+
 def _onboarding_cli(
     argv: Sequence[str] | None = None,
     *,
@@ -1160,6 +1285,36 @@ def _onboarding_cli(
     version_parser = subparsers.add_parser("version", help=f"Print the {brand} CLI version.")
     version_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
+    downroute_db_help = "Local TokenClaw SQLite path, default: TOKENCLAW_DB or ~/.tokenclaw/tokenclaw.sqlite3."
+    downroute_pocket_help = "Pocket as a requested family (e.g. 'opus') or full key (e.g. 'opus->sonnet')."
+    downroute_parser = subparsers.add_parser(
+        "downroute",
+        help="Inspect and arm per-pocket read-only downrouting dials (default off).",
+    )
+    downroute_subparsers = downroute_parser.add_subparsers(dest="downroute_command", required=True)
+    downroute_status_parser = downroute_subparsers.add_parser(
+        "status",
+        help="Show each downroute pocket's f, armed state, and harm evidence.",
+    )
+    downroute_status_parser.add_argument("--db", default=None, help=downroute_db_help)
+    downroute_status_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    for _sub, _sub_help in (
+        ("arm", "Arm a pocket: set f to TOKENCLAW_DOWNROUTE_F_START and reset its evidence window."),
+        ("disarm", "Disarm a pocket: set f to 0 (no downrouting) and reset its evidence window."),
+    ):
+        _p = downroute_subparsers.add_parser(_sub, help=_sub_help)
+        _p.add_argument("pocket", help=downroute_pocket_help)
+        _p.add_argument("--db", default=None, help=downroute_db_help)
+        _p.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    downroute_setf_parser = downroute_subparsers.add_parser(
+        "set-f",
+        help="Set a pocket's downroute fraction f directly (operator override).",
+    )
+    downroute_setf_parser.add_argument("pocket", help=downroute_pocket_help)
+    downroute_setf_parser.add_argument("--f", type=float, required=True, help="Downroute fraction in [0,1].")
+    downroute_setf_parser.add_argument("--db", default=None, help=downroute_db_help)
+    downroute_setf_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
     args = parser.parse_args(argv)
     if not hasattr(args, "config_dir") or args.config_dir is None:
         args.config_dir = default_config_dir()
@@ -1381,6 +1536,95 @@ def _onboarding_cli(
             # A clean install has no legacy DB; "nothing to adopt" is a successful
             # no-op, not an error. Real adoption failures raise instead.
             return 0 if result.get("ok") or result.get("status") == "legacy-db-missing" else 1
+
+    if args.command == "downroute":
+        from tokenclaw import downroute as _downroute_mod
+
+        db_path = getattr(args, "db", None) or default_db_path()
+        controller_enabled = _downroute_mod.DownrouteConfig.from_env().controller_enabled
+        store = _open_store_for_db(db_path)
+        try:
+            if args.downroute_command == "status":
+                result = _downroute_status_result(
+                    store.list_downroute_pockets(),
+                    controller_enabled=controller_enabled,
+                )
+                if args.json:
+                    _write_json(stdout, result)
+                else:
+                    _write_downroute_status_summary(stdout, result, brand=brand)
+                return 0
+
+            resolved = _resolve_downroute_pocket(args.pocket)
+            if resolved is None:
+                _write_json(
+                    stderr,
+                    {
+                        "ok": False,
+                        "schema": "tokenclaw.downroute_pocket.v1",
+                        "error": "unknown-pocket",
+                        "pocket": args.pocket,
+                        "known": _downroute_known_pockets(),
+                    },
+                )
+                return 2
+            pocket_key, req_fam, tgt_fam = resolved
+            if args.downroute_command == "arm":
+                row = store.set_downroute_pocket_f(
+                    pocket=pocket_key,
+                    f=_downroute_mod.DownrouteConfig.from_env().f_start,
+                    requested_family=req_fam,
+                    target_family=tgt_fam,
+                    action="arm",
+                    reset_window=True,
+                )
+            elif args.downroute_command == "disarm":
+                row = store.set_downroute_pocket_f(
+                    pocket=pocket_key,
+                    f=0.0,
+                    requested_family=req_fam,
+                    target_family=tgt_fam,
+                    action="disarm",
+                    reset_window=True,
+                )
+            else:  # set-f
+                f_val = float(args.f)
+                if not (0.0 <= f_val <= 1.0):
+                    _write_json(
+                        stderr,
+                        {
+                            "ok": False,
+                            "schema": "tokenclaw.downroute_pocket.v1",
+                            "error": "f-out-of-range",
+                            "pocket": pocket_key,
+                            "f": f_val,
+                        },
+                    )
+                    return 2
+                row = store.set_downroute_pocket_f(
+                    pocket=pocket_key,
+                    f=f_val,
+                    requested_family=req_fam,
+                    target_family=tgt_fam,
+                    action="set",
+                )
+            result = {
+                "ok": True,
+                "schema": "tokenclaw.downroute_pocket.v1",
+                "command": args.downroute_command,
+                "controller_enabled": controller_enabled,
+                "pocket": _downroute_pocket_view(row),
+            }
+            if args.json:
+                _write_json(stdout, result)
+            else:
+                _write_downroute_pocket_action_summary(stdout, result, brand=brand)
+            return 0
+        finally:
+            try:
+                store.conn.close()
+            except Exception:
+                pass
 
     if args.command == "savings":
         if args.savings_command == "loop-bottlenecks":

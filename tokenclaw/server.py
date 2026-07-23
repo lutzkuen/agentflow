@@ -196,6 +196,7 @@ _routing_outcome_label_task: asyncio.Task[Any] | None = None
 _managed_feedback_drainer_task: asyncio.Task[Any] | None = None
 _streaming_cohort_feedback_task: asyncio.Task[Any] | None = None
 _streaming_tool_cache_drill_task: asyncio.Task[Any] | None = None
+_downroute_finalizer_task: asyncio.Task[Any] | None = None
 
 
 def _provider_context() -> ProviderContext:
@@ -254,6 +255,35 @@ async def _periodic_routing_outcome_label_finalizer(interval_seconds: int) -> No
     while True:
         await asyncio.sleep(max(1, int(interval_seconds)))
         await _finalize_routing_outcome_labels_once()
+
+
+async def _finalize_downroute_outcomes_once() -> None:
+    if not hasattr(store, "finalize_downroute_outcomes"):
+        return
+    try:
+        result = await asyncio.to_thread(store.finalize_downroute_outcomes)
+        if int(result.get("clean_count") or 0) or int(result.get("harm_count") or 0) or int(result.get("skipped_count") or 0):
+            steps = " ".join(
+                f"{p.get('pocket')}:{p.get('action')}->f={p.get('f')}"
+                for p in (result.get("pockets") or [])
+                if isinstance(p, dict) and p.get("action") in ("advance", "retreat")
+            )
+            print(
+                "tokenclaw_downroute_outcomes "
+                f"clean={result.get('clean_count')} harm={result.get('harm_count')} "
+                f"skipped={result.get('skipped_count')} "
+                f"controller={'on' if result.get('controller_enabled') else 'off'}"
+                + (f" steps=[{steps}]" if steps else ""),
+                file=sys.stderr,
+            )
+    except Exception as exc:
+        print(f"tokenclaw_downroute_outcomes_error: {exc}", file=sys.stderr)
+
+
+async def _periodic_downroute_outcome_finalizer(interval_seconds: int) -> None:
+    while True:
+        await asyncio.sleep(max(1, int(interval_seconds)))
+        await _finalize_downroute_outcomes_once()
 
 
 async def _drain_managed_outcome_feedback_once(*, limit: int, stale_after_seconds: int) -> list[dict[str, Any]]:
@@ -436,9 +466,10 @@ app.include_router(create_admin_router(after_reload=_refresh_policy_module_bindi
 @app.on_event("startup")
 async def _log_startup_session_spending_summary() -> None:
     global _routing_outcome_label_task, _managed_feedback_drainer_task, _streaming_cohort_feedback_task
-    global _streaming_tool_cache_drill_task
+    global _streaming_tool_cache_drill_task, _downroute_finalizer_task
     _log_recent_session_spending_summary("startup")
     await _finalize_routing_outcome_labels_once()
+    await _finalize_downroute_outcomes_once()
     try:
         label_interval = env_int("TOKENCLAW_ROUTING_OUTCOME_LABEL_INTERVAL_SECONDS", 60)
     except ValueError:
@@ -446,6 +477,11 @@ async def _log_startup_session_spending_summary() -> None:
     if label_interval > 0 and _routing_outcome_label_task is None:
         _routing_outcome_label_task = asyncio.create_task(
             _periodic_routing_outcome_label_finalizer(label_interval)
+        )
+    downroute_interval = env_int("TOKENCLAW_DOWNROUTE_FINALIZE_INTERVAL_SECONDS", 60)
+    if downroute_interval > 0 and _downroute_finalizer_task is None:
+        _downroute_finalizer_task = asyncio.create_task(
+            _periodic_downroute_outcome_finalizer(downroute_interval)
         )
     feedback_interval = env_int("TOKENCLAW_MANAGED_FEEDBACK_DRAIN_INTERVAL_SECONDS", 60)
     feedback_limit = env_int("TOKENCLAW_MANAGED_FEEDBACK_DRAIN_BATCH_LIMIT", 100)
@@ -518,7 +554,7 @@ async def _log_startup_session_spending_summary() -> None:
 @app.on_event("shutdown")
 async def _log_shutdown_session_spending_summary() -> None:
     global _routing_outcome_label_task, _managed_feedback_drainer_task, _streaming_cohort_feedback_task
-    global _streaming_tool_cache_drill_task
+    global _streaming_tool_cache_drill_task, _downroute_finalizer_task
     if _routing_outcome_label_task is not None:
         _routing_outcome_label_task.cancel()
         _routing_outcome_label_task = None
@@ -531,6 +567,9 @@ async def _log_shutdown_session_spending_summary() -> None:
     if _streaming_tool_cache_drill_task is not None:
         _streaming_tool_cache_drill_task.cancel()
         _streaming_tool_cache_drill_task = None
+    if _downroute_finalizer_task is not None:
+        _downroute_finalizer_task.cancel()
+        _downroute_finalizer_task = None
     _log_recent_session_spending_summary("shutdown")
 
 

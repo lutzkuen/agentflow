@@ -99,6 +99,23 @@ def _routing_outcome_label_from_routing(routing_json: Any) -> str:
     return "unknown"
 
 
+def _downroute_from_routing(routing_json: Any) -> dict[str, Any] | None:
+    routing = _parse_json_object(routing_json)
+    if not isinstance(routing, dict):
+        return None
+    section = routing.get("downroute")
+    return section if isinstance(section, dict) else None
+
+
+def _downroute_verdict_from_routing(routing_json: Any) -> str | None:
+    section = _downroute_from_routing(routing_json)
+    if section is None:
+        return None
+    if section.get("decided") is True:
+        return "pending"
+    return None
+
+
 def _safe_metadata_label(value: Any, *, fallback: str = "unknown") -> str:
     text = str(value or "").strip()
     if not text:
@@ -755,6 +772,28 @@ class SQLiteStore:
             self._ensure_column("calls", "routed_model_family", "text")
             self._ensure_column("calls", "routing_outcome_label", "text")
             self._ensure_column("calls", "managed_routing_json", "text")
+            self._ensure_column("calls", "downroute_verdict", "text")
+            cur.execute("""
+            create table if not exists downroute_pockets (
+              pocket text primary key,
+              requested_family text,
+              target_family text,
+              f real not null default 0,
+              eligible_count integer not null default 0,
+              applied_count integer not null default 0,
+              clean_count integer not null default 0,
+              harm_count integer not null default 0,
+              harm_error_count integer not null default 0,
+              harm_repair_count integer not null default 0,
+              window_applied integer not null default 0,
+              window_clean integer not null default 0,
+              window_harm integer not null default 0,
+              last_action text,
+              last_step_at text,
+              armed_at text,
+              updated_at text
+            )
+            """)
             cur.execute("""
             create table if not exists provider_tool_adoption_windows (
               id text primary key,
@@ -1270,13 +1309,15 @@ class SQLiteStore:
             kwargs["managed_routing_json"] = _managed_routing_json_from_routing(kwargs.get("routing_json"))
         if kwargs.get("routing_outcome_label") in (None, ""):
             kwargs["routing_outcome_label"] = _routing_outcome_label_from_routing(kwargs.get("routing_json"))
+        if kwargs.get("downroute_verdict") in (None, ""):
+            kwargs["downroute_verdict"] = _downroute_verdict_from_routing(kwargs.get("routing_json"))
         cols = [
             "id", "created_at", "path", "requested_model", "routed_model", "stream", "cache_hit", "status_code",
             "latency_ms", "input_tokens_est", "output_tokens_est", "actual_input_tokens", "actual_output_tokens",
             "cost_est_usd", "cost_baseline_usd", "crunch_json", "routing_json", "cache_json", "error", "request_json", "response_json", "session_id",
             "category", "cache_creation_input_tokens", "cache_read_input_tokens", "retry_count", "thinking_output_tokens", "provider",
             "source_surface", "endpoint", "requested_model_family", "routed_model_family", "routing_outcome_label",
-            "managed_routing_json",
+            "managed_routing_json", "downroute_verdict",
         ]
         values = [kwargs.get(c, "anthropic") if c == "provider" else kwargs.get(c) for c in cols]
         with self._lock:
@@ -1382,6 +1423,336 @@ class SQLiteStore:
             "safe_count": counts["safe"],
             "unsafe_count": counts["unsafe"],
             "unknown_count": counts["unknown"],
+        }
+
+    # --- Downroute pockets --------------------------------------------------
+
+    def _downroute_pocket_row(self, pocket: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "select * from downroute_pockets where pocket = ?", (str(pocket),)
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_downroute_pocket_f(self, pocket: str, default: float = 0.0) -> float:
+        """Current downroute fraction for a pocket. Hot path: one indexed read.
+        Absent pocket -> ``default`` (an unseen pocket downroutes nothing)."""
+        with self._lock:
+            row = self._downroute_pocket_row(pocket)
+        if row is None or row.get("f") is None:
+            return float(default)
+        try:
+            return float(row["f"])
+        except (TypeError, ValueError):
+            return float(default)
+
+    def note_downroute_pocket_eligible(
+        self,
+        *,
+        pocket: str,
+        requested_family: str | None = None,
+        target_family: str | None = None,
+        default_f: float = 0.0,
+    ) -> None:
+        """Best-effort telemetry: record that an eligible turn was seen for this
+        pocket. Creates the row at ``default_f`` if absent (so ``status`` shows
+        observed-but-unarmed pockets, f=0, changing no behavior)."""
+        now = utc_now()
+        with self._lock:
+            row = self._downroute_pocket_row(pocket)
+            if row is None:
+                self.conn.execute(
+                    """
+                    insert into downroute_pockets(
+                      pocket, requested_family, target_family, f,
+                      eligible_count, updated_at
+                    ) values (?, ?, ?, ?, 1, ?)
+                    """,
+                    (str(pocket), requested_family, target_family, float(default_f), now),
+                )
+            else:
+                self.conn.execute(
+                    "update downroute_pockets set eligible_count = eligible_count + 1, updated_at = ? where pocket = ?",
+                    (now, str(pocket)),
+                )
+            self.conn.commit()
+
+    def set_downroute_pocket_f(
+        self,
+        *,
+        pocket: str,
+        f: float,
+        requested_family: str | None = None,
+        target_family: str | None = None,
+        action: str = "set",
+        reset_window: bool = False,
+    ) -> dict[str, Any]:
+        """Operator dial: arm/disarm/set-f. Upserts the row and records the
+        action. ``reset_window`` clears the controller's evidence window (used on
+        arm/disarm so a fresh f starts a fresh window)."""
+        now = utc_now()
+        f_val = float(f)
+        with self._lock:
+            row = self._downroute_pocket_row(pocket)
+            armed_at = now if (action == "arm" or (row is None and f_val > 0)) else (
+                row.get("armed_at") if row else None
+            )
+            if row is None:
+                self.conn.execute(
+                    """
+                    insert into downroute_pockets(
+                      pocket, requested_family, target_family, f,
+                      last_action, armed_at, updated_at
+                    ) values (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (str(pocket), requested_family, target_family, f_val, action, armed_at, now),
+                )
+            else:
+                if reset_window:
+                    self.conn.execute(
+                        """
+                        update downroute_pockets
+                        set f = ?, last_action = ?, armed_at = ?, updated_at = ?,
+                            window_applied = 0, window_clean = 0, window_harm = 0
+                        where pocket = ?
+                        """,
+                        (f_val, action, armed_at, now, str(pocket)),
+                    )
+                else:
+                    self.conn.execute(
+                        "update downroute_pockets set f = ?, last_action = ?, armed_at = ?, updated_at = ? where pocket = ?",
+                        (f_val, action, armed_at, now, str(pocket)),
+                    )
+            self.conn.commit()
+            return self._downroute_pocket_row(pocket) or {}
+
+    def list_downroute_pockets(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self.conn.execute(
+                "select * from downroute_pockets order by pocket asc"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def finalize_downroute_outcomes(
+        self,
+        *,
+        older_than_seconds: int | None = None,
+        now: str | None = None,
+        limit: int = 1000,
+        config: Any = None,
+    ) -> dict[str, Any]:
+        """Deferred harm-verdict pass over downrouted calls.
+
+        A downrouted call is marked ``pending`` at log time. Once its trajectory
+        window has closed (TTL elapsed), we judge it clean or harmful by stitching
+        the same-session trajectory:
+
+          error harm  — the call itself errored/retried/fell back, or a later
+                        same-session turn errored/retried inside the window;
+          repair harm — a later *frontier* turn (same session, ran on the
+                        requested tier, i.e. not itself downrouted) re-issued a
+                        read against a target this cheap call already read. That
+                        is the workhorse quality signal: the frontier redoing the
+                        cheap model's read means the cheap read was inadequate.
+
+        Verdicts bump the pocket's evidence counters (cumulative + a controller
+        window) and, when the controller is enabled, drive one AIMD step.
+        """
+        from . import downroute as _dr
+        from .cache import _model_family
+
+        def _loads_any(value: Any) -> Any:
+            if value is None or value == "":
+                return None
+            try:
+                return json.loads(str(value))
+            except (ValueError, TypeError):
+                return None
+
+        cfg = config if config is not None else _dr.DownrouteConfig.from_env()
+        ttl_seconds = max(0, int(older_than_seconds if older_than_seconds is not None else cfg.verdict_ttl_seconds))
+        window_turns = max(1, int(cfg.window_turns))
+        now_dt = _parse_utc_iso(now) or datetime.now(timezone.utc)
+        cutoff = (now_dt - timedelta(seconds=ttl_seconds)).isoformat()
+        capped = max(1, min(int(limit or 1), 10000))
+        now_iso = now_dt.isoformat()
+
+        counts = {"clean": 0, "harm": 0, "skipped": 0}
+        # pocket -> accumulated deltas for this batch
+        deltas: dict[str, dict[str, Any]] = {}
+
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                select id, created_at, session_id, status_code, retry_count,
+                       routing_json, requested_model, routed_model, response_json
+                from calls
+                where downroute_verdict = 'pending'
+                  and created_at <= ?
+                order by created_at asc
+                limit ?
+                """,
+                (cutoff, capped),
+            ).fetchall()
+            candidate_count = len(rows)
+
+            for row in rows:
+                pocket = _dr.pocket_for(row["requested_model"])
+                created_at = _parse_utc_iso(row["created_at"])
+                if pocket is None or created_at is None:
+                    self.conn.execute(
+                        "update calls set downroute_verdict = 'skipped' where id = ?",
+                        (row["id"],),
+                    )
+                    counts["skipped"] += 1
+                    continue
+                requested_family, target_family = pocket
+                key = _dr.pocket_key(requested_family, target_family)
+                deadline = (created_at + timedelta(seconds=ttl_seconds)).isoformat()
+
+                error_harm = False
+                status_code = row["status_code"]
+                if status_code is not None and int(status_code) >= 400:
+                    error_harm = True
+                retry_count = row["retry_count"]
+                if retry_count is not None and int(retry_count) > 0:
+                    error_harm = True
+                if self._routing_meta_has_fallback(row["routing_json"]):
+                    error_harm = True
+                if not error_harm:
+                    sibling = self.conn.execute(
+                        """
+                        select id from calls
+                        where session_id = ? and id != ?
+                          and created_at >= ? and created_at <= ?
+                          and (coalesce(retry_count, 0) > 0 or coalesce(status_code, 0) >= 400)
+                        order by created_at asc limit 1
+                        """,
+                        (row["session_id"], row["id"], row["created_at"], deadline),
+                    ).fetchone() if row["session_id"] else None
+                    error_harm = sibling is not None
+
+                repair_harm = False
+                if cfg.repair_signal_enabled and row["session_id"]:
+                    own_targets = _dr.extract_tool_targets(_loads_any(row["response_json"]))
+                    if own_targets:
+                        followers = self.conn.execute(
+                            """
+                            select routed_model, response_json from calls
+                            where session_id = ? and id != ?
+                              and created_at >= ? and created_at <= ?
+                            order by created_at asc limit ?
+                            """,
+                            (row["session_id"], row["id"], row["created_at"], deadline, window_turns),
+                        ).fetchall()
+                        for follower in followers:
+                            if _model_family(follower["routed_model"]) != requested_family:
+                                continue  # only a frontier redo counts as repair
+                            if _dr.extract_tool_targets(_loads_any(follower["response_json"])) & own_targets:
+                                repair_harm = True
+                                break
+
+                harm = error_harm or repair_harm
+                verdict = "harm" if harm else "clean"
+                self.conn.execute(
+                    "update calls set downroute_verdict = ? where id = ?",
+                    (verdict, row["id"]),
+                )
+                counts[verdict] += 1
+
+                d = deltas.setdefault(
+                    key,
+                    {
+                        "requested_family": requested_family,
+                        "target_family": target_family,
+                        "applied": 0, "clean": 0, "harm": 0,
+                        "harm_error": 0, "harm_repair": 0,
+                    },
+                )
+                d["applied"] += 1
+                d[verdict] += 1
+                if harm:
+                    if error_harm:
+                        d["harm_error"] += 1
+                    else:
+                        d["harm_repair"] += 1
+
+            pocket_states: dict[str, dict[str, Any]] = {}
+            for key, d in deltas.items():
+                row = self._downroute_pocket_row(key)
+                cur_f = float(row["f"]) if row and row.get("f") is not None else float(cfg.f_default)
+                win_applied = (int(row["window_applied"]) if row else 0) + d["applied"]
+                win_clean = (int(row["window_clean"]) if row else 0) + d["clean"]
+                win_harm = (int(row["window_harm"]) if row else 0) + d["harm"]
+
+                decision = _dr.controller_step(
+                    f=cur_f, window_applied=win_applied, window_harm=win_harm, cfg=cfg
+                )
+                if decision.reset_window:
+                    new_f, new_wa, new_wc, new_wh = decision.new_f, 0, 0, 0
+                    last_action, last_step_at = decision.action, now_iso
+                else:
+                    new_f, new_wa, new_wc, new_wh = cur_f, win_applied, win_clean, win_harm
+                    last_action = row.get("last_action") if row else None
+                    last_step_at = row.get("last_step_at") if row else None
+
+                if row is None:
+                    self.conn.execute(
+                        """
+                        insert into downroute_pockets(
+                          pocket, requested_family, target_family, f,
+                          applied_count, clean_count, harm_count,
+                          harm_error_count, harm_repair_count,
+                          window_applied, window_clean, window_harm,
+                          last_action, last_step_at, updated_at
+                        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            key, d["requested_family"], d["target_family"], new_f,
+                            d["applied"], d["clean"], d["harm"],
+                            d["harm_error"], d["harm_repair"],
+                            new_wa, new_wc, new_wh,
+                            last_action, last_step_at, now_iso,
+                        ),
+                    )
+                else:
+                    self.conn.execute(
+                        """
+                        update downroute_pockets set
+                          f = ?,
+                          applied_count = applied_count + ?,
+                          clean_count = clean_count + ?,
+                          harm_count = harm_count + ?,
+                          harm_error_count = harm_error_count + ?,
+                          harm_repair_count = harm_repair_count + ?,
+                          window_applied = ?, window_clean = ?, window_harm = ?,
+                          last_action = ?, last_step_at = ?, updated_at = ?
+                        where pocket = ?
+                        """,
+                        (
+                            new_f,
+                            d["applied"], d["clean"], d["harm"],
+                            d["harm_error"], d["harm_repair"],
+                            new_wa, new_wc, new_wh,
+                            last_action, last_step_at, now_iso, key,
+                        ),
+                    )
+                pocket_states[key] = {
+                    "pocket": key, "f": new_f, "action": decision.action,
+                    "reason": decision.reason,
+                    "applied_delta": d["applied"], "harm_delta": d["harm"],
+                }
+            self.conn.commit()
+
+        return {
+            "schema": "tokenclaw.downroute_outcome_finalization.v1",
+            "older_than_seconds": ttl_seconds,
+            "cutoff_at": cutoff,
+            "candidate_count": candidate_count,
+            "clean_count": counts["clean"],
+            "harm_count": counts["harm"],
+            "skipped_count": counts["skipped"],
+            "controller_enabled": bool(cfg.controller_enabled),
+            "pockets": list(pocket_states.values()),
         }
 
     def cache_pattern_observed_call_count(
@@ -1625,11 +1996,23 @@ class SQLiteStore:
     def update_call_routing_json(self, call_id: str, routing_json: str) -> None:
         managed_routing_json = _managed_routing_json_from_routing(routing_json)
         routing_outcome_label = _routing_outcome_label_from_routing(routing_json)
+        downroute_verdict = _downroute_verdict_from_routing(routing_json)
         with self._lock:
-            self.conn.execute(
-                "update calls set routing_json = ?, managed_routing_json = ?, routing_outcome_label = ? where id = ?",
-                (routing_json, managed_routing_json, routing_outcome_label, call_id),
-            )
+            if downroute_verdict is not None:
+                # A decided downroute stamps 'pending' so finalize_downroute_outcomes
+                # picks the call up. Only ever writes 'pending' here; the deferred
+                # pass owns the clean/harm/skipped transitions, so a non-downroute
+                # persist below must not clobber a verdict it already resolved.
+                self.conn.execute(
+                    "update calls set routing_json = ?, managed_routing_json = ?, "
+                    "routing_outcome_label = ?, downroute_verdict = ? where id = ?",
+                    (routing_json, managed_routing_json, routing_outcome_label, downroute_verdict, call_id),
+                )
+            else:
+                self.conn.execute(
+                    "update calls set routing_json = ?, managed_routing_json = ?, routing_outcome_label = ? where id = ?",
+                    (routing_json, managed_routing_json, routing_outcome_label, call_id),
+                )
             self.conn.commit()
 
     def update_call_cache_json(self, call_id: str, cache_json: str) -> None:

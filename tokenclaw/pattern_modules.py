@@ -1284,12 +1284,18 @@ def evaluate_pattern_modules(
     policy_source: str = "local-default",
     rule_path: str | None = None,
     category: str | None = None,
+    collect_server_features: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     active = registry or DEFAULT_PATTERN_MODULE_REGISTRY
     current_body = copy.deepcopy(body)
     server_features: list[dict[str, Any]] = []
     module_metas: list[dict[str, Any]] = []
     total_saved_chars = 0
+    # When collect_server_features is False (the latency-sensitive forward path),
+    # per-module features() — pure managed-learning telemetry that never affects the
+    # upstream body — is skipped and computed off-path instead. apply_local_crunch()
+    # only needs the detection, so the crunched body is identical either way.
+    cached_text: str | None = None
 
     for module in active.modules():
         setting = _module_setting(module_settings, module.family)
@@ -1315,9 +1321,27 @@ def evaluate_pattern_modules(
             module_metas.append(meta)
             continue
 
+        will_apply = apply_local_crunch and local_crunch_enabled and module.supports_local_crunch
+        if not collect_server_features and not will_apply:
+            # Forward path, feature-only module: its features() are pure managed
+            # telemetry and it never mutates the body, so there is nothing to do here.
+            meta = module.outcome_metadata(
+                status="skipped",
+                reason="server-features-deferred",
+                detection=None,
+                features=None,
+                changed=False,
+                saved_chars=0,
+            )
+            meta.update(base_meta)
+            module_metas.append(meta)
+            continue
+
+        if cached_text is None:
+            cached_text = _extract_text(current_body)
         context = PatternModuleContext(
             body=current_body,
-            text=_extract_text(current_body),
+            text=cached_text,
             category=category,
             policy_source=policy_source,
             rule_path=rule_path,
@@ -1336,31 +1360,36 @@ def evaluate_pattern_modules(
             module_metas.append(meta)
             continue
 
-        features = module.features(context, detection)
-        feature_entry = _safe_feature_entry(module, features)
-        violations = managed_egress_violations(feature_entry)
-        if violations:
-            meta = module.outcome_metadata(
-                status="bypass",
-                reason="privacy-guard-rejected",
-                detection=detection,
-                features=None,
-                changed=False,
-                saved_chars=0,
-            )
-            meta.update(base_meta)
-            meta["privacy_guard"] = _privacy_guard_meta(violations)
-            module_metas.append(meta)
-            continue
+        if collect_server_features:
+            features = module.features(context, detection)
+            feature_entry = _safe_feature_entry(module, features)
+            violations = managed_egress_violations(feature_entry)
+            if violations:
+                meta = module.outcome_metadata(
+                    status="bypass",
+                    reason="privacy-guard-rejected",
+                    detection=detection,
+                    features=None,
+                    changed=False,
+                    saved_chars=0,
+                )
+                meta.update(base_meta)
+                meta["privacy_guard"] = _privacy_guard_meta(violations)
+                module_metas.append(meta)
+                continue
+        else:
+            features = None
+            feature_entry = None
 
         changed = False
         saved_chars = 0
         reason = "feature-only-no-local-crunch"
         status = "skipped"
-        if apply_local_crunch and local_crunch_enabled and module.supports_local_crunch:
+        if will_apply:
             before_chars = len(stable_json(current_body))
             crunch_result = module.apply_local_crunch(current_body, context, detection)
             current_body = crunch_result.body
+            cached_text = None
             after_chars = len(stable_json(current_body))
             changed = bool(crunch_result.changed or before_chars != after_chars)
             saved_chars = max(0, int(crunch_result.saved_chars or before_chars - after_chars))
@@ -1368,7 +1397,8 @@ def evaluate_pattern_modules(
             status = "applied" if changed else "skipped"
             total_saved_chars += saved_chars
 
-        server_features.append(feature_entry)
+        if feature_entry is not None:
+            server_features.append(feature_entry)
         meta = module.outcome_metadata(
             status=status,
             reason=reason,

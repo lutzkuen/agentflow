@@ -2,7 +2,7 @@ import asyncio
 import time
 import unittest
 
-from tokenclaw.limiter import TierBackoffActive, TierLimiter, model_tier, tier_backoff_headers, tier_backoff_payload
+from tokenclaw.limiter import TierBackoffActive, TierLimiter, TierSlot, model_tier, tier_backoff_headers, tier_backoff_payload
 
 
 class TierLimiterTests(unittest.TestCase):
@@ -45,6 +45,42 @@ class TierLimiterTests(unittest.TestCase):
         asyncio.run(limiter.record_backoff("claude-haiku-4-5-20251001", {"retry-after": "1"}))
 
         self.assertEqual(limiter.backoff_until["haiku"], existing_until)
+
+    def test_slot_early_release_frees_capacity_for_next_request(self):
+        # The slot guards request initiation, not the whole stream. Releasing it early
+        # (at first token) must return capacity so a queued parallel request proceeds
+        # without waiting out the first request's generation.
+        async def scenario():
+            limiter = TierLimiter(max_concurrent_per_tier=1)
+            slot = limiter.slot("claude-sonnet-4-6")
+            await slot.__aenter__()
+            second = limiter.slot("claude-sonnet-4-6")
+            waiter = asyncio.ensure_future(second.__aenter__())
+            await asyncio.sleep(0)
+            self.assertFalse(waiter.done())  # capped at 1 -> second is blocked
+            slot.release()                    # first request got its first token
+            await asyncio.wait_for(waiter, timeout=1)
+            self.assertTrue(waiter.done())    # second acquired the freed slot
+            await second.__aexit__(None, None, None)
+
+        asyncio.run(scenario())
+
+    def test_slot_release_is_idempotent(self):
+        # __aexit__ must not double-release after an explicit early release.
+        async def scenario():
+            limiter = TierLimiter(max_concurrent_per_tier=1)
+            async with limiter.slot("claude-sonnet-4-6") as slot:
+                slot.release()
+                slot.release()  # extra explicit release is a no-op
+            # exit also released; capacity is exactly 1, not inflated
+            self.assertEqual(limiter.semaphores["sonnet"]._value, 1)
+            slot2 = limiter.slot("claude-sonnet-4-6")
+            await slot2.__aenter__()
+            self.assertEqual(limiter.semaphores["sonnet"]._value, 0)
+            await slot2.__aexit__(None, None, None)
+            self.assertEqual(limiter.semaphores["sonnet"]._value, 1)
+
+        asyncio.run(scenario())
 
     def test_record_backoff_skips_long_usage_limit_retry_after(self):
         # A long retry-after is the user's account/usage limit, not transient

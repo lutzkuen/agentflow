@@ -32,10 +32,16 @@ from tokenclaw.limiter import TierBackoffActive, model_tier, tier_backoff_header
 from tokenclaw.router import (
     extract_text, has_tools, categorize_request, classify_workflow_phase, route_model,
     STRIP_THINKING_HISTORY, _has_top_level_thinking, strip_thinking_history_blocks, uses_thinking,
+    _TIER_MAP,
+)
+from tokenclaw.downroute import (
+    DownrouteConfig, classify_eligibility, decide_downroute,
+    pocket_for, pocket_key, resolve_target_model,
 )
 from tokenclaw.crunch import (
     TOKEN_CHARS, estimate_tokens_from_text, build_embedding,
-    crunch_body, inject_prompt_cache, has_cache_control_blocks,
+    crunch_body, compute_pattern_module_server_features,
+    inject_prompt_cache, has_cache_control_blocks,
     maybe_summarize_old_context, OLD_CONTEXT_SUMMARY_MODEL,
     CRUNCH_POLICY, CRUNCH_POLICY_SOURCE, CRUNCH_RULES_PATH,
 )
@@ -94,6 +100,7 @@ from tokenclaw.recommendations import (
     policy_decisions_enabled,
     queue_policy_event_feedback,
     queue_outcome_feedback,
+    recommendations_enabled,
 )
 from tokenclaw.local_compaction_canary_ramp import build_thinking_tail_feedback_freshness
 from tokenclaw.managed_session_tier import (
@@ -149,6 +156,194 @@ ANTHROPIC_SHADOW_STREAMING = os.getenv(
 # request-shape message survives sanitization instead of being redacted for length.
 SHADOW_HTTP_ERROR_DETAIL_MAX_CHARS = 160
 
+# The per-module server feature bundle is pure managed-learning telemetry; it never
+# affects the response. Compute it off the request path so ~0.4s of feature-extraction
+# regex per large request stops blocking the event loop (and serializing concurrent
+# forwards). Set to 0 to skip the telemetry entirely.
+PATTERN_FEATURE_BACKGROUND = os.getenv(
+    "TOKENCLAW_PATTERN_FEATURE_BACKGROUND", "1"
+).strip().lower() not in {"0", "false", "no", "off"}
+
+# Downrouting config is read once at import (like the crunch/cache policies). Env
+# changes to TOKENCLAW_DOWNROUTE_* need a restart; per-pocket arming lives in the
+# store, not env, and is picked up live via the short f-cache below.
+_DOWNROUTE_CONFIG = DownrouteConfig.from_env()
+# pocket_key -> (f, expires_monotonic). A few-second TTL keeps the shipped-but-
+# unarmed hot path free of per-request SQLite reads once f=0 is cached, while
+# operator arming still takes effect within the TTL.
+_DOWNROUTE_F_CACHE: dict[str, tuple[float, float]] = {}
+_DOWNROUTE_F_CACHE_TTL_SECONDS = 5.0
+
+
+def _cached_pocket_f(store_obj: Any, pocket: str, default: float) -> float:
+    """Per-pocket downroute fraction with a few-second TTL cache.
+
+    The shipped-but-unarmed hot path resolves f=0 once, then serves from the
+    cache, so a passthrough prod never pays a per-request SQLite read for a dial
+    nobody armed. Operator arming still takes effect within the TTL.
+    """
+    now = time.monotonic()
+    cached = _DOWNROUTE_F_CACHE.get(pocket)
+    if cached is not None and cached[1] > now:
+        return cached[0]
+    try:
+        f = float(store_obj.get_downroute_pocket_f(pocket, default))
+    except Exception:
+        f = float(default)
+    _DOWNROUTE_F_CACHE[pocket] = (f, now + _DOWNROUTE_F_CACHE_TTL_SECONDS)
+    return f
+
+
+def _maybe_apply_downroute(
+    *,
+    store_obj: Any,
+    raw_body: dict[str, Any],
+    crunched: dict[str, Any],
+    routing_meta: dict[str, Any],
+    category: Optional[str],
+    session_id: str | None,
+    call_id: str,
+    resolved_requested_model: Any,
+    sampled_shadow_pass_through: bool,
+    input_tokens: int,
+    cfg: DownrouteConfig = _DOWNROUTE_CONFIG,
+) -> None:
+    """Lowest-priority local dial: probabilistically downroute a read-only
+    tool-heavy turn to a cheaper same-provider tier.
+
+    Fires only on a genuine passthrough — when manual rules, experiments, the
+    session tier, and the managed recommendation all declined to move the model
+    off the requested one — and never on a sampled shadow pass-through. Stamps
+    ``routing_meta["downroute"]`` so the deferred store finalize pass can later
+    judge whether the downroute harmed the agent. Server-bound outcome feedback
+    for a decided downroute is suppressed downstream (local applies / server
+    learns): the server never learns this dial moved the model.
+    """
+    if sampled_shadow_pass_through:
+        return
+    if str(crunched.get("model") or "") != str(resolved_requested_model):
+        return
+    pocket = pocket_for(resolved_requested_model)
+    if pocket is None:
+        return
+    req_family, target_family = pocket
+    key = pocket_key(req_family, target_family)
+    elig = classify_eligibility(raw_body, category, cfg)
+    if not elig.eligible:
+        return
+    f = _cached_pocket_f(store_obj, key, cfg.f_default)
+    if f <= 0.0:
+        routing_meta["downroute"] = {
+            "pocket": key, "from": req_family, "to": target_family,
+            "eligible": True, "f": 0.0, "decided": False, "reason": "pocket-unarmed",
+        }
+        return
+    try:
+        store_obj.note_downroute_pocket_eligible(
+            pocket=key, requested_family=req_family,
+            target_family=target_family, default_f=cfg.f_default,
+        )
+    except Exception:
+        pass
+    if not decide_downroute(session_id=session_id, call_id=call_id, f=f):
+        routing_meta["downroute"] = {
+            "pocket": key, "from": req_family, "to": target_family,
+            "eligible": True, "f": f, "decided": False, "reason": "coin-flip-kept",
+        }
+        return
+    target_model = resolve_target_model(target_family, _TIER_MAP)
+    if not target_model:
+        routing_meta["downroute"] = {
+            "pocket": key, "from": req_family, "to": target_family,
+            "eligible": True, "f": f, "decided": False, "reason": "no-target-model",
+        }
+        return
+    crunched["model"] = target_model
+    routing_meta["routed_model"] = target_model
+    routing_meta["downroute"] = {
+        "pocket": key, "from": req_family, "to": target_family,
+        "eligible": True, "f": f, "decided": True, "target_model": target_model,
+        "reason": elig.reason, "tool_names": list(elig.tool_names),
+        "input_tokens": input_tokens,
+    }
+    # Routing does not crunch: the token count is invariant across a downroute.
+    # Log the invariant plus the estimated input-cost delta (metric is tokens per
+    # CLAUDE.md; the $ delta is the point of the dial and what evidence accrues on).
+    cost_before = estimate_cost(str(resolved_requested_model), input_tokens, 0, provider="anthropic") or 0.0
+    cost_after = estimate_cost(target_model, input_tokens, 0, provider="anthropic") or 0.0
+    print(
+        f"downroute: pocket={key} from={resolved_requested_model} to={target_model} "
+        f"f={f:.3f} tokens_before={input_tokens} tokens_after={input_tokens} "
+        f"est_input_cost_delta_usd={cost_after - cost_before:.6f}",
+        flush=True,
+    )
+
+# Managed-learning telemetry (per-module pattern features, prompt-difficulty features)
+# costs ~0.4-0.5s of regex per large request and never affects the response or the
+# LOCAL routing decision — it only feeds the managed research server, which learns from
+# aggregate traffic. Computing it on every request serializes concurrent forwards on the
+# single event loop (one process, GIL-bound), so it is sampled: only this fraction of
+# requests pay for it. The server still gets a representative signal; the rest of the
+# fleet takes the lean forward path. 1.0 = every request, 0 = never.
+def _telemetry_sample_rate() -> float:
+    try:
+        return max(0.0, min(1.0, float(os.getenv("TOKENCLAW_TELEMETRY_SAMPLE_RATE", "0.15"))))
+    except (TypeError, ValueError):
+        return 0.15
+
+
+def _telemetry_sampled(key: str) -> bool:
+    rate = _telemetry_sample_rate()
+    if rate >= 1.0:
+        return True
+    if rate <= 0.0:
+        return False
+    bucket = int(hashlib.sha256(key.encode("utf-8")).hexdigest()[:8], 16) / 0xFFFFFFFF
+    return bucket < rate
+
+
+def _schedule_background_pattern_features(
+    context: ProviderContext,
+    *,
+    crunch_meta: dict[str, Any],
+    body: dict[str, Any],
+    managed_profile: dict[str, Any] | None,
+) -> None:
+    """Populate crunch_meta["pattern_modules"] with full server features off-path.
+
+    The forward crunch runs with collect_server_features=False so the loop is not
+    blocked by telemetry the response never needs. This recomputes the feature-only
+    bundle in a worker thread and splices it into the SAME crunch_meta dict, so the
+    request's normal post-response managed outcome feedback still ships full server
+    features. It has no store side effects (apply_local_crunch=False) and never raises
+    into the request. The forward path's managed policy decision uses the lighter
+    feature set; the server still learns the full detail via outcome feedback.
+    """
+    if not PATTERN_FEATURE_BACKGROUND:
+        return
+    if not (recommendations_enabled() or policy_decisions_enabled()):
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    snapshot = copy.deepcopy(body)
+    managed_profile_copy = copy.deepcopy(managed_profile) if managed_profile else None
+
+    async def _run() -> None:
+        try:
+            pattern_modules = await asyncio.to_thread(
+                compute_pattern_module_server_features,
+                snapshot,
+                managed_profile=managed_profile_copy,
+            )
+            if isinstance(pattern_modules, dict):
+                crunch_meta["pattern_modules"] = pattern_modules
+        except Exception as exc:
+            print(f"tokenclaw_background_pattern_features_error: {exc}", file=sys.stderr)
+
+    loop.create_task(_run())
+
 
 async def _queue_optimization_coordinator_lifecycle_feedback(
     context: ProviderContext,
@@ -195,6 +390,7 @@ def _anthropic_preflight_routing_meta(
     *,
     requested_model: str,
     category: str | None,
+    include_prompt_difficulty: bool = True,
 ) -> dict[str, Any]:
     text = extract_text(body)
     phase_meta = classify_workflow_phase(body, category)
@@ -210,7 +406,11 @@ def _anthropic_preflight_routing_meta(
         "workflow_phase_reason": phase_meta.get("workflow_phase_reason"),
         "policy_source": "preflight",
         "provider": "anthropic",
-        "prompt_difficulty_features": prompt_difficulty_features_from_text(text),
+        # prompt-difficulty is managed telemetry (does not affect local routing); only
+        # compute it on sampled requests to keep the forward path off the ~145ms regex.
+        "prompt_difficulty_features": (
+            prompt_difficulty_features_from_text(text) if include_prompt_difficulty else {}
+        ),
     }
 
 
@@ -650,6 +850,19 @@ async def _record_managed_outcome_feedback(
     session_id: str | None,
     error: str | None = None,
 ) -> None:
+    # Boundary firewall (CLAUDE.md "local applies / server learns"): a decided
+    # local downroute moved the model to a cheaper target AFTER the managed server
+    # already made its decision. Every server-bound stream below embeds routed_model
+    # (= the downrouted target for these calls); reporting it would teach the server
+    # a false model->outcome pair for a unit it built against the requested model.
+    # Suppress all four (cache-replay, summary, phase, managed outcome) and persist
+    # only the local routing_meta, whose "downroute" sub-object drives the deferred
+    # local harm-verdict pass. Server-side the call is simply never reported — a
+    # neutral gap, never a corrupted signal.
+    downroute_section = routing_meta.get("downroute")
+    if isinstance(downroute_section, dict) and downroute_section.get("decided"):
+        context.store.update_call_routing_json(call_id, stable_json(routing_meta))
+        return
     dirty_routing_meta = False
     dirty_cache_meta = False
     cache_replay_feedback = build_cache_replay_lifecycle_feedback(
@@ -1682,6 +1895,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
         return provider_disabled_response(context, "anthropic")
     started = time.time()
     call_id = str(uuid.uuid4())
+    telemetry_sampled = _telemetry_sampled(call_id)
     path = "/v1/messages"
     client_ip = (request.client.host if request.client else "unknown")
     session_id = request.headers.get("x-session-id") or hashlib.sha256(
@@ -1752,6 +1966,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             raw_body,
             requested_model=str(raw_body.get("model") or requested_model),
             category=category,
+            include_prompt_difficulty=telemetry_sampled,
         )
         preflight_cache_meta = cache_decision_meta("skipped", "preflight")
         preflight_crunch_meta = {"old_context_summarization": summary_meta}
@@ -1793,24 +2008,29 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
         else:
             recommendation_meta = await fetch_recommendation(preflight_recommendation_unit)
         managed_crunch_profile = _managed_crunch_profile_from_recommendation(recommendation_meta)
-        if managed_crunch_profile:
-            crunched, crunch_meta = crunch_body(
-                raw_body,
-                store_obj=context.store,
+        # The forward path only needs the crunched body (which apply_local_crunch
+        # produces from detections alone) — not the per-module server feature bundle,
+        # which is pure managed-learning telemetry. Skip it here and run it off the
+        # request path (see _schedule_background_pattern_features). Running the crunch
+        # in a worker thread keeps the event loop free to dispatch and stream other
+        # concurrent requests instead of serializing behind this one's CPU work.
+        crunched, crunch_meta = await asyncio.to_thread(
+            crunch_body,
+            raw_body,
+            store_obj=context.store,
+            managed_profile=managed_crunch_profile,
+            routing_meta=preflight_routing_meta,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            endpoint="messages",
+            collect_server_features=False,
+        )
+        if telemetry_sampled:
+            _schedule_background_pattern_features(
+                context,
+                crunch_meta=crunch_meta,
+                body=raw_body,
                 managed_profile=managed_crunch_profile,
-                routing_meta=preflight_routing_meta,
-                provider="anthropic",
-                source_surface="anthropic_messages",
-                endpoint="messages",
-            )
-        else:
-            crunched, crunch_meta = crunch_body(
-                raw_body,
-                store_obj=context.store,
-                routing_meta=preflight_routing_meta,
-                provider="anthropic",
-                source_surface="anthropic_messages",
-                endpoint="messages",
             )
         crunch_meta["old_context_summarization"] = summary_meta
         crunched, prompt_cached = inject_prompt_cache(crunched)
@@ -1888,7 +2108,11 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             routing_meta["thinking_capped"] = True
             print(f"thinking_cap: original={_original_budget} cap={MAX_THINKING_BUDGET_TOKENS}", flush=True)
         crunched_text = extract_text(crunched)
-        routing_meta["prompt_difficulty_features"] = prompt_difficulty_features_from_text(crunched_text)
+        # Reuse the single preflight computation (managed telemetry, sampled) rather
+        # than paying another ~145ms of regex on the crunched text every request.
+        routing_meta["prompt_difficulty_features"] = preflight_routing_meta.get(
+            "prompt_difficulty_features", {}
+        )
         input_tokens = estimate_tokens_from_text(crunched_text)
         recommendation_unit = build_optimization_unit(
             provider="anthropic",
@@ -1950,6 +2174,22 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 recommendation_meta["fallback"] = "local-policy"
                 crunched["model"] = str(resolved_requested_model)
             routing_meta["routed_model"] = str(resolved_requested_model)
+        # Lowest-priority local dial: only fires on a genuine passthrough (nothing
+        # above moved the model off the requested one) and never on a sampled shadow
+        # pass-through. Placed just before the final strip so a downrouted model gets
+        # its now-incompatible thinking params cleaned by the strip below for free.
+        _maybe_apply_downroute(
+            store_obj=context.store,
+            raw_body=raw_body,
+            crunched=crunched,
+            routing_meta=routing_meta,
+            category=category,
+            session_id=session_id,
+            call_id=call_id,
+            resolved_requested_model=resolved_requested_model,
+            sampled_shadow_pass_through=sampled_shadow_pass_through,
+            input_tokens=input_tokens,
+        )
         _strip_model_incompatible_params(crunched, routing_meta, str(resolved_requested_model))
         if prompt_cached or has_cache_control_blocks(crunched):
             existing = headers.get("anthropic-beta", "")
@@ -2246,7 +2486,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                                 output_text_parts.append(str(delta.get("text") or ""))
 
                 try:
-                    async with context.limiter.semaphores[model_tier(crunched["model"])]:
+                    async with context.limiter.slot(crunched["model"]) as _tier_slot:
                         async with async_client(timeout=context.http_timeout) as client:
                             while True:
                                 await context.limiter.await_backoff(crunched["model"])
@@ -2270,6 +2510,10 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                                                 print(f"rate_limit_fallback: routing {_rate_limited_model!r} -> {resolved_requested_model!r}")
                                             await asyncio.sleep(delay)
                                             continue
+                                        # Upstream is responding: free the per-tier slot so
+                                        # other queued parallel requests can start streaming
+                                        # instead of waiting out this whole generation.
+                                        _tier_slot.release()
                                         async for chunk in r.aiter_bytes():
                                             sse_frame_buf += chunk
                                             while b"\n\n" in sse_frame_buf:

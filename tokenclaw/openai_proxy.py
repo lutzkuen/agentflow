@@ -918,7 +918,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                         reasoning_tokens = max(reasoning_tokens, reason_tok)
 
                 try:
-                    async with context.limiter.semaphores[model_tier(crunched["model"])]:
+                    async with context.limiter.slot(crunched["model"]) as _tier_slot:
                         async with async_client(timeout=context.http_timeout) as client:
                             while True:
                                 await context.limiter.await_backoff(crunched["model"])
@@ -944,6 +944,10 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                                                 print(f"openai_rate_limit_fallback: routing {_rate_limited_model!r} -> {resolved_requested_model!r}")
                                             await asyncio.sleep(delay)
                                             continue
+                                        # Upstream is responding: free the per-tier slot so
+                                        # other queued parallel requests can start streaming
+                                        # instead of waiting out this whole generation.
+                                        _tier_slot.release()
                                         async for chunk in r.aiter_bytes():
                                             sse_frame_buf += chunk
                                             while b"\n\n" in sse_frame_buf:

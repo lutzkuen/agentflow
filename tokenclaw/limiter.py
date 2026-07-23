@@ -26,6 +26,35 @@ def model_tier(model: str) -> str:
     return "sonnet"
 
 
+class TierSlot:
+    """Per-tier concurrency slot that can be released before its ``async with`` exits.
+
+    The tier semaphore guards request *initiation* bursts, not sustained streaming.
+    Holding a slot for the whole generation caps concurrent streams at
+    ``max_concurrent_per_tier`` and serializes parallel client bursts behind
+    multi-second generations. Callers release the slot once the upstream response
+    is actually streaming; ``__aexit__`` still releases on any early/error exit.
+    """
+
+    def __init__(self, sem: asyncio.Semaphore) -> None:
+        self._sem = sem
+        self._held = False
+
+    async def __aenter__(self) -> "TierSlot":
+        await self._sem.acquire()
+        self._held = True
+        return self
+
+    async def __aexit__(self, *exc: Any) -> bool:
+        self.release()
+        return False
+
+    def release(self) -> None:
+        if self._held:
+            self._sem.release()
+            self._held = False
+
+
 @dataclass(frozen=True)
 class TierBackoffActive(Exception):
     tier: str
@@ -94,6 +123,9 @@ class TierLimiter:
                 "queued_count": queued,
             })
         return tiers
+
+    def slot(self, model: str) -> TierSlot:
+        return TierSlot(self.semaphores[model_tier(model)])
 
     async def await_backoff(self, model: str) -> None:
         tier = model_tier(model)
