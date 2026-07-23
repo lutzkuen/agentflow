@@ -6,6 +6,7 @@ import os
 import re
 import sqlite3
 import threading
+from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -795,6 +796,16 @@ class SQLiteStore:
             )
             """)
             cur.execute("""
+            create table if not exists tool_catalog (
+              name text primary key,
+              call_count integer not null default 0,
+              first_seen text,
+              last_seen text,
+              readonly_override integer,
+              updated_at text
+            )
+            """)
+            cur.execute("""
             create table if not exists provider_tool_adoption_windows (
               id text primary key,
               created_at text not null,
@@ -1531,6 +1542,100 @@ class SQLiteStore:
                 "select * from downroute_pockets order by pocket asc"
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # --- Tool catalog -------------------------------------------------------
+    # Local-only record of tool-use names the proxy has observed, with an
+    # operator-settable read-only override. Names are already extracted locally
+    # for downroute eligibility and never leave the machine; persisting them here
+    # backs the dashboard "Tool calls" tab (frequency/recency + the checkbox) and
+    # extends the read-only allow-list without a code change or redeploy.
+
+    def record_tool_sightings(self, names: Iterable[str]) -> None:
+        """Best-effort: bump per-turn counts/recency for observed tool names.
+        Deduped within the turn so ``call_count`` counts turns-seen, not calls.
+        Called off the hot path; must never raise into a request."""
+        seen: list[str] = []
+        for raw in names:
+            name = str(raw or "").strip().lower()
+            if name and name not in seen:
+                seen.append(name)
+        if not seen:
+            return
+        now = utc_now()
+        try:
+            with self._lock:
+                for name in seen:
+                    row = self.conn.execute(
+                        "select name from tool_catalog where name = ?", (name,)
+                    ).fetchone()
+                    if row is None:
+                        self.conn.execute(
+                            """
+                            insert into tool_catalog(
+                              name, call_count, first_seen, last_seen,
+                              readonly_override, updated_at
+                            ) values (?, 1, ?, ?, null, ?)
+                            """,
+                            (name, now, now, now),
+                        )
+                    else:
+                        self.conn.execute(
+                            "update tool_catalog set call_count = call_count + 1, last_seen = ?, updated_at = ? where name = ?",
+                            (now, now, name),
+                        )
+                self.conn.commit()
+        except Exception:
+            pass
+
+    def list_tool_catalog(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self.conn.execute(
+                "select * from tool_catalog order by call_count desc, name asc"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_tool_readonly_override(self, name: str, readonly: bool | None) -> dict[str, Any]:
+        """Operator write: mark a tool read-only (True/False) or clear the
+        override (None -> revert to the default allow-list). Upserts so a tool
+        that has not been seen yet is still settable."""
+        key = str(name or "").strip().lower()
+        if not key:
+            raise ValueError("tool name is required")
+        value = None if readonly is None else (1 if readonly else 0)
+        now = utc_now()
+        with self._lock:
+            row = self.conn.execute(
+                "select name from tool_catalog where name = ?", (key,)
+            ).fetchone()
+            if row is None:
+                self.conn.execute(
+                    """
+                    insert into tool_catalog(
+                      name, call_count, first_seen, last_seen,
+                      readonly_override, updated_at
+                    ) values (?, 0, ?, ?, ?, ?)
+                    """,
+                    (key, now, now, value, now),
+                )
+            else:
+                self.conn.execute(
+                    "update tool_catalog set readonly_override = ?, updated_at = ? where name = ?",
+                    (value, now, key),
+                )
+            self.conn.commit()
+            out = self.conn.execute(
+                "select * from tool_catalog where name = ?", (key,)
+            ).fetchone()
+        return dict(out) if out is not None else {}
+
+    def read_only_override_map(self) -> dict[str, bool]:
+        """Tool name -> operator read-only decision, for rows with an override
+        set. Consumed by downroute's TTL-cached effective allow-list resolver."""
+        with self._lock:
+            rows = self.conn.execute(
+                "select name, readonly_override from tool_catalog where readonly_override is not null"
+            ).fetchall()
+        return {str(r["name"]): bool(r["readonly_override"]) for r in rows}
 
     def finalize_downroute_outcomes(
         self,

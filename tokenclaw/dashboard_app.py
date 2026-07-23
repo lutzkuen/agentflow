@@ -844,6 +844,134 @@ def create_dashboard_router(
         )
         return JSONResponse(result, status_code=int(status_code))
 
+    @router.get("/tokenclaw/stats/tools")
+    async def stats_tools() -> dict[str, Any]:
+        from tokenclaw.downroute import READ_ONLY_TOOLS
+
+        rows = await asyncio.to_thread(_store(store_obj).list_tool_catalog)
+        tools: list[dict[str, Any]] = []
+        for row in rows:
+            name = row.get("name")
+            override = row.get("readonly_override")
+            has_override = override is not None
+            default_read_only = name in READ_ONLY_TOOLS
+            effective_read_only = bool(override) if has_override else default_read_only
+            tools.append(
+                {
+                    "name": name,
+                    "call_count": row.get("call_count"),
+                    "first_seen": row.get("first_seen"),
+                    "last_seen": row.get("last_seen"),
+                    "default_read_only": default_read_only,
+                    "effective_read_only": effective_read_only,
+                    "has_override": has_override,
+                }
+            )
+        return {"schema": "tokenclaw.stats_tools.v1", "tools": tools}
+
+    @router.post("/tokenclaw/dashboard/admin/tool-readonly", response_model=None)
+    async def dashboard_set_tool_readonly_override(request: Request) -> Any:
+        client_host = request.client.host if request.client else None
+        if not _dashboard_writes_enabled():
+            log_policy_event(
+                "tool-readonly-override-forward",
+                ok=False,
+                details={
+                    "source": "dashboard_lan_forwarder",
+                    "client_host": client_host,
+                    "status": "disabled",
+                    "error_type": "dashboard_writes_disabled",
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                },
+            )
+            return JSONResponse(
+                {
+                    "schema": "tokenclaw.dashboard_tool_readonly_override_forward.v1",
+                    "ok": False,
+                    "error": {
+                        "type": "dashboard_writes_disabled",
+                        "message": "dashboard config writes are disabled",
+                    },
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                },
+                status_code=403,
+            )
+
+        body, error_response = await _dashboard_json_object_request(
+            request,
+            schema="tokenclaw.dashboard_tool_readonly_override_forward.v1",
+        )
+        if error_response is not None:
+            log_policy_event(
+                "tool-readonly-override-forward",
+                ok=False,
+                details={
+                    "source": "dashboard_lan_forwarder",
+                    "client_host": client_host,
+                    "status": "invalid-request",
+                    "error_type": "invalid_json",
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                },
+            )
+            return error_response
+        assert body is not None
+
+        headers = {
+            "x-tokenclaw-admin-source": "dashboard_lan_forwarder",
+        }
+        if client_host:
+            headers["x-tokenclaw-forwarded-client-host"] = client_host
+
+        path = "/tokenclaw/admin/tool-readonly"
+        try:
+            status_code, result = await forward_admin(path, body, headers)
+        except Exception as exc:
+            log_policy_event(
+                "tool-readonly-override-forward",
+                ok=False,
+                details={
+                    "source": "dashboard_lan_forwarder",
+                    "client_host": client_host,
+                    "status": "forward-error",
+                    "error_type": exc.__class__.__name__,
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                },
+            )
+            return JSONResponse(
+                {
+                    "schema": "tokenclaw.dashboard_tool_readonly_override_forward.v1",
+                    "ok": False,
+                    "error": {
+                        "type": "admin_forward_failed",
+                        "message": "dashboard could not reach the local proxy admin endpoint",
+                    },
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                },
+                status_code=502,
+            )
+
+        ok = 200 <= int(status_code) < 300 and bool(result.get("ok"))
+        log_policy_event(
+            "tool-readonly-override-forward",
+            ok=ok,
+            details={
+                "source": "dashboard_lan_forwarder",
+                "client_host": client_host,
+                "forward_target": "loopback_proxy_admin",
+                "forward_path": path,
+                "tool_name": body.get("name") if isinstance(body.get("name"), str) else None,
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+                "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
+            },
+        )
+        return JSONResponse(result, status_code=int(status_code))
+
     @router.get("/tokenclaw/stats/weekly")
     async def stats_weekly() -> dict[str, Any]:
         return await stats_views.stats_weekly(_store(store_obj))

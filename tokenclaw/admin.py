@@ -157,7 +157,10 @@ async def reload_policy_modules(after_reload: Callable[[], None] | None = None) 
     return payload
 
 
-def create_admin_router(after_reload: Callable[[], None] | None = None) -> APIRouter:
+def create_admin_router(
+    after_reload: Callable[[], None] | None = None,
+    store_obj: Callable[[], Any] | None = None,
+) -> APIRouter:
     router = APIRouter()
 
     @router.options("/tokenclaw/admin/routing-experiments/candidates", response_model=None)
@@ -222,6 +225,103 @@ def create_admin_router(after_reload: Callable[[], None] | None = None) -> APIRo
             status_code=200 if result.get("ok") else 400,
             headers=_loopback_cors_headers(request),
         )
+
+    @router.options("/tokenclaw/admin/tool-readonly", response_model=None)
+    async def set_tool_readonly_override_options(request: Request) -> Any:
+        if not request_is_loopback(request):
+            return _forbidden_workbench_response(
+                "tool-readonly-override-preflight",
+                request,
+                "tool read-only overrides are only available from loopback clients",
+            )
+        return JSONResponse(
+            {
+                "ok": True,
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+            },
+            headers=_loopback_cors_headers(request),
+        )
+
+    @router.post("/tokenclaw/admin/tool-readonly", response_model=None)
+    async def set_tool_readonly_override(request: Request) -> Any:
+        if not request_is_loopback(request):
+            return _forbidden_workbench_response(
+                "tool-readonly-override",
+                request,
+                "tool read-only overrides are only available from loopback clients",
+            )
+
+        body, error_response = await _json_object_request(
+            request,
+            schema="tokenclaw.tool_readonly_override.v1",
+        )
+        if error_response is not None:
+            return error_response
+        assert body is not None
+
+        name = body.get("name")
+        read_only = body.get("read_only")
+        if not isinstance(name, str) or not name.strip():
+            return JSONResponse(
+                {
+                    "schema": "tokenclaw.tool_readonly_override.v1",
+                    "ok": False,
+                    "error": {"type": "invalid_payload", "message": "name is required"},
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                },
+                status_code=400,
+                headers=_loopback_cors_headers(request),
+            )
+        if read_only is not None and not isinstance(read_only, bool):
+            return JSONResponse(
+                {
+                    "schema": "tokenclaw.tool_readonly_override.v1",
+                    "ok": False,
+                    "error": {"type": "invalid_payload", "message": "read_only must be a boolean or null"},
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                },
+                status_code=400,
+                headers=_loopback_cors_headers(request),
+            )
+        if store_obj is None:
+            return JSONResponse(
+                {
+                    "schema": "tokenclaw.tool_readonly_override.v1",
+                    "ok": False,
+                    "error": {"type": "unavailable", "message": "store is not available"},
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                },
+                status_code=503,
+                headers=_loopback_cors_headers(request),
+            )
+
+        store = store_obj()
+        row = store.set_tool_readonly_override(name, read_only)
+        result = {
+            "schema": "tokenclaw.tool_readonly_override.v1",
+            "ok": True,
+            "tool": row,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+        }
+        log_policy_event(
+            "tool-readonly-override",
+            ok=True,
+            details={
+                **_admin_event_details(request),
+                "tool_name": name.strip().lower(),
+                "read_only": read_only,
+                "wrote_active_policy_files": False,
+                "reloaded_modules": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+            },
+        )
+        return JSONResponse(result, headers=_loopback_cors_headers(request))
 
     @router.post("/tokenclaw/admin/reload-policies", response_model=None)
     async def reload_policies(request: Request) -> Any:

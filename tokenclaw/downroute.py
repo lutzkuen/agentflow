@@ -22,10 +22,12 @@ off. See CLAUDE.md "Calibrated local dials".
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import os
 import random
+import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
@@ -160,7 +162,13 @@ def recent_tool_use_names(body: Any) -> list[str]:
     return []
 
 
-def classify_eligibility(body: Any, category: Optional[str], cfg: "DownrouteConfig") -> Eligibility:
+def classify_eligibility(
+    body: Any,
+    category: Optional[str],
+    cfg: "DownrouteConfig",
+    *,
+    read_only_names: frozenset[str] | None = None,
+) -> Eligibility:
     """Decide whether this turn is a read-only tool-heavy turn we may downroute.
 
     Gate: the proxy-computed ``category`` must be in the operator-configured
@@ -169,16 +177,89 @@ def classify_eligibility(body: Any, category: Optional[str], cfg: "DownrouteConf
     tool_use tightens the population to genuine mechanical read trajectories and
     excludes first/planning turns (the interpretation/judgment turns that must
     stay on the frontier model).
+
+    ``read_only_names`` is the effective read-only allow-list; when omitted it is
+    the code default ``READ_ONLY_TOOLS`` (keeps this function pure/store-free for
+    tests). Seams pass ``effective_read_only_names(store)`` so an operator's
+    dashboard override extends the set without a code change.
     """
+    allow = READ_ONLY_TOOLS if read_only_names is None else read_only_names
     if category not in cfg.eligible_categories:
         return Eligibility(False, f"category:{category}")
     names = recent_tool_use_names(body)
     if not names:
         return Eligibility(False, "no-recent-tool-use")
-    non_read = sorted({n for n in names if n not in READ_ONLY_TOOLS})
+    non_read = sorted({n for n in names if n not in allow})
     if non_read:
         return Eligibility(False, "mutating-or-unknown:" + ",".join(non_read)[:120], tuple(names))
     return Eligibility(True, "read-only-tool-heavy", tuple(names))
+
+
+# pocket-independent cache of the operator-effective read-only allow-list; a few-
+# second TTL keeps both downroute seams off a per-request DB read while an
+# operator's dashboard toggle still takes effect within the TTL. Mirrors
+# openai_proxy._openai_cached_pocket_f.
+_EFFECTIVE_READ_ONLY_CACHE: dict[str, Any] = {"names": None, "expires": 0.0}
+_EFFECTIVE_READ_ONLY_TTL_SECONDS = 5.0
+
+
+def effective_read_only_names(store: Any) -> frozenset[str]:
+    """The read-only allow-list after operator overrides: the code default plus
+    tools the operator ticked read-only, minus defaults the operator un-ticked.
+    Both directions honored. Store failure falls back to the code default."""
+    now = time.monotonic()
+    cached = _EFFECTIVE_READ_ONLY_CACHE
+    if cached["names"] is not None and cached["expires"] > now:
+        return cached["names"]
+    try:
+        override_map = store.read_only_override_map()
+    except Exception:
+        override_map = {}
+    added = {n for n, v in override_map.items() if v}
+    removed = {n for n, v in override_map.items() if not v}
+    names = frozenset((READ_ONLY_TOOLS | added) - removed)
+    cached["names"] = names
+    cached["expires"] = now + _EFFECTIVE_READ_ONLY_TTL_SECONDS
+    return names
+
+
+def schedule_tool_sightings(store: Any, body: Any) -> None:
+    """Fire-and-forget: persist the turn's observed tool-use names to the local
+    tool catalog that backs the dashboard "Tool calls" tab. Called from the
+    downroute seams for every turn (independent of downroute eligibility) so
+    unknown and mutating tools surface for the operator too. Off the request hot
+    path — the DB write runs in a worker thread — and never raises. Names stay
+    local (never forwarded to the server), same privacy design as the dial.
+    ``TOKENCLAW_TOOL_CATALOG=0`` is the kill-switch."""
+    if not _env_bool("TOKENCLAW_TOOL_CATALOG", True):
+        return
+    try:
+        names = recent_tool_use_names(body)
+    except Exception:
+        return
+    if not names:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is None:
+        try:
+            store.record_tool_sightings(names)
+        except Exception:
+            pass
+        return
+    task = loop.create_task(asyncio.to_thread(store.record_tool_sightings, names))
+    task.add_done_callback(_consume_sighting_task_exception)
+
+
+def _consume_sighting_task_exception(task: "asyncio.Task[Any]") -> None:
+    try:
+        task.exception()
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        return
 
 
 # --- Pockets: requested-family -> target-family -----------------------------

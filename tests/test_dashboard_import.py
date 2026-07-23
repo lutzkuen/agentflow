@@ -157,9 +157,9 @@ class DashboardImportTests(unittest.TestCase):
             )
         store.conn.commit()
 
-    def _assert_default_dashboard_two_tabs(self, rendered: str) -> None:
+    def _assert_default_dashboard_tabs(self, rendered: str) -> None:
         tab_labels = re.findall(r'<button class="tab-btn[^"]*"[^>]*>([^<]+)</button>', rendered)
-        self.assertEqual(tab_labels, ["Today", "Last 7 days"])
+        self.assertEqual(tab_labels, ["Today", "Last 7 days", "Tool calls"])
         self.assertIn("TokenClaw", rendered)
         self.assertIn("/tokenclaw/stats", rendered)
         self.assertIn("/tokenclaw/stats/weekly", rendered)
@@ -535,7 +535,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("/tokenclaw/stats", dashboard.text)
             self.assertIn("/tokenclaw/stats/weekly", dashboard.text)
             tab_labels = re.findall(r'<button class="tab-btn[^"]*"[^>]*>([^<]+)</button>', dashboard.text)
-            self.assertEqual(tab_labels, ["Today", "Last 7 days"])
+            self.assertEqual(tab_labels, ["Today", "Last 7 days", "Tool calls"])
             self.assertIn("today-calls", dashboard.text)
             self.assertIn("recent-tbody", dashboard.text)
             self.assertIn("week-spend", dashboard.text)
@@ -852,7 +852,7 @@ class DashboardImportTests(unittest.TestCase):
                 self.assertNotIn(forbidden, rendered)
 
             self.assertEqual(dashboard.status_code, 200)
-            self._assert_default_dashboard_two_tabs(dashboard.text)
+            self._assert_default_dashboard_tabs(dashboard.text)
         finally:
             if old_review_path is None:
                 os.environ.pop("TOKENCLAW_PROMOTION_BLOCKER_REVIEW_PATH", None)
@@ -1013,7 +1013,7 @@ class DashboardImportTests(unittest.TestCase):
                 self.assertNotIn(forbidden, rendered)
 
             self.assertEqual(dashboard.status_code, 200)
-            self._assert_default_dashboard_two_tabs(dashboard.text)
+            self._assert_default_dashboard_tabs(dashboard.text)
         finally:
             if old_priority_review is None:
                 os.environ.pop("TOKENCLAW_POST_PROMOTION_PRIORITY_REVIEW_PATH", None)
@@ -1200,7 +1200,7 @@ class DashboardImportTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, rendered)
         self.assertEqual(dashboard.status_code, 200)
-        self._assert_default_dashboard_two_tabs(dashboard.text)
+        self._assert_default_dashboard_tabs(dashboard.text)
 
     def test_dashboard_inline_javascript_syntax_checks_with_node(self):
         node = shutil.which("node")
@@ -1485,7 +1485,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(rollout["active_policy"]["rule_path_included"])
 
             self.assertEqual(dashboard.status_code, 200)
-            self._assert_default_dashboard_two_tabs(dashboard.text)
+            self._assert_default_dashboard_tabs(dashboard.text)
 
             rendered = (
                 json.dumps(opportunity, sort_keys=True)
@@ -1623,7 +1623,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn(payload["state"], {"disabled", "ready"})
             self.assertFalse(payload["policy"]["rule_file"]["rule_path_included"])
             self.assertFalse(payload["policy"]["rule_file"]["policy_file_contents_included"])
-            self._assert_default_dashboard_two_tabs(dashboard_response.text)
+            self._assert_default_dashboard_tabs(dashboard_response.text)
             self.assertFalse(payload["privacy"]["raw_terminal_lines_included"])
             self.assertFalse(payload["privacy"]["raw_terminal_text_included"])
             self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
@@ -1882,7 +1882,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(payload["summary"]["managed_lifecycle_feedback_retryable_error"], 1)
             self.assertEqual(payload["summary"]["managed_lifecycle_feedback_dropped"], 1)
             self.assertFalse(payload["lifecycle_feedback"]["payload_json_included"])
-            self._assert_default_dashboard_two_tabs(dashboard_response.text)
+            self._assert_default_dashboard_tabs(dashboard_response.text)
             self.assertFalse(payload["privacy"]["raw_terminal_lines_included"])
             self.assertFalse(payload["privacy"]["raw_terminal_text_included"])
             self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
@@ -2065,7 +2065,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(payload["privacy"]["cache_keys_included"])
             self.assertFalse(payload["privacy"]["payload_json_included"])
             self.assertEqual(dashboard.status_code, 200)
-            self._assert_default_dashboard_two_tabs(dashboard.text)
+            self._assert_default_dashboard_tabs(dashboard.text)
 
             rendered = json.dumps(payload, sort_keys=True) + dashboard.text
             for forbidden in (
@@ -2579,7 +2579,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(payload["privacy"]["raw_provider_bodies_included"])
             self.assertFalse(payload["privacy"]["provider_calls_made"])
             self.assertEqual(dashboard.status_code, 200)
-            self._assert_default_dashboard_two_tabs(dashboard.text)
+            self._assert_default_dashboard_tabs(dashboard.text)
 
             rendered = json.dumps(payload, sort_keys=True) + dashboard.text
             for forbidden in (
@@ -2895,7 +2895,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(payload["summary"]["canary_holdout_count"], 1)
             self.assertEqual(payload["summary"]["pending_lifecycle_feedback_count"], 1)
             self.assertEqual(dashboard.status_code, 200)
-            self._assert_default_dashboard_two_tabs(dashboard.text)
+            self._assert_default_dashboard_tabs(dashboard.text)
             self.assertEqual(action_response.status_code, 200)
             action_payload = action_response.json()
             self.assertEqual(action_payload["schema"], "tokenclaw.optimization_promotion_actions_dashboard.v1")
@@ -3136,7 +3136,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(yield_payload["privacy"]["raw_prompts_included"])
             self.assertFalse(yield_payload["privacy"]["request_ids_included"])
             self.assertEqual(dashboard.status_code, 200)
-            self._assert_default_dashboard_two_tabs(dashboard.text)
+            self._assert_default_dashboard_tabs(dashboard.text)
 
             rendered = json.dumps(payload, sort_keys=True) + json.dumps(yield_payload, sort_keys=True) + dashboard.text
             for forbidden in (
@@ -3494,7 +3494,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(payload["privacy"]["raw_action_payloads_included"])
             self.assertFalse(payload["privacy"]["yaml_contents_included"])
             self.assertEqual(dashboard.status_code, 200)
-            self._assert_default_dashboard_two_tabs(dashboard.text)
+            self._assert_default_dashboard_tabs(dashboard.text)
 
             rendered = json.dumps(payload) + dashboard.text
             self.assertNotIn("raw prompt must stay hidden", rendered)
@@ -3667,7 +3667,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(queue["privacy"]["payload_json_included"])
             self.assertFalse(payload["privacy"]["managed_feedback_payload_json_included"])
             self.assertEqual(dashboard.status_code, 200)
-            self._assert_default_dashboard_two_tabs(dashboard.text)
+            self._assert_default_dashboard_tabs(dashboard.text)
             rendered = json.dumps(payload) + dashboard.text
             self.assertNotIn("must not appear in dashboard", rendered)
             self.assertNotIn("provider body must stay local", rendered)
@@ -3821,7 +3821,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(payload["privacy"]["session_ids_included"])
             self.assertFalse(payload["privacy"]["cache_keys_included"])
             self.assertEqual(dashboard.status_code, 200)
-            self._assert_default_dashboard_two_tabs(dashboard.text)
+            self._assert_default_dashboard_tabs(dashboard.text)
 
             rendered = json.dumps(payload, sort_keys=True) + dashboard.text
             self.assertNotIn(str(plan_path), rendered)
@@ -4235,7 +4235,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(full_payload["activation_burndown"]["privacy"]["session_ids_included"])
             self.assertFalse(full_payload["activation_burndown"]["privacy"]["cache_keys_included"])
             self.assertEqual(dashboard.status_code, 200)
-            self._assert_default_dashboard_two_tabs(dashboard.text)
+            self._assert_default_dashboard_tabs(dashboard.text)
 
             rendered = (
                 json.dumps(payload, sort_keys=True)
@@ -4337,7 +4337,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(health["summary"]["top_projected_savings_usd"], 0.0)
             self.assertIn(health["summary"]["top_next_action"], (None, ""))
             self.assertEqual(dashboard.status_code, 200)
-            self._assert_default_dashboard_two_tabs(dashboard.text)
+            self._assert_default_dashboard_tabs(dashboard.text)
             self.assertFalse(health["privacy"]["raw_prompts_included"])
             self.assertFalse(health["privacy"]["provider_bodies_included"])
             self.assertFalse(health["privacy"]["request_ids_included"])
@@ -4583,7 +4583,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(health["privacy"]["cache_keys_included"])
             self.assertIn("activation_successor_queue_health", full_payload["summary"])
             self.assertEqual(dashboard.status_code, 200)
-            self._assert_default_dashboard_two_tabs(dashboard.text)
+            self._assert_default_dashboard_tabs(dashboard.text)
 
             rendered = json.dumps(payload, sort_keys=True) + json.dumps(full_payload, sort_keys=True) + dashboard.text
             self.assertNotIn(str(plan_path), rendered)

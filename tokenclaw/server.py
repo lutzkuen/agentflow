@@ -460,7 +460,9 @@ app.include_router(
         proxy_host=DEFAULT_HOST,
     )
 )
-app.include_router(create_admin_router(after_reload=_refresh_policy_module_bindings))
+app.include_router(
+    create_admin_router(after_reload=_refresh_policy_module_bindings, store_obj=lambda: store)
+)
 
 
 @app.on_event("startup")

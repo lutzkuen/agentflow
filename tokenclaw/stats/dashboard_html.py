@@ -64,6 +64,7 @@ def dashboard_html() -> str:
 <nav class="tabs" aria-label="Dashboard views">
   <button class="tab-btn active" type="button" data-tab-name="today" onclick="showTab('today')">Today</button>
   <button class="tab-btn" type="button" data-tab-name="last7" onclick="showTab('last7')">Last 7 days</button>
+  <button class="tab-btn" type="button" data-tab-name="tools" onclick="showTab('tools')">Tool calls</button>
 </nav>
 
 <main>
@@ -115,6 +116,22 @@ def dashboard_html() -> str:
             <th>Date</th><th>Units</th><th>Provider calls</th><th>Codex turns</th><th>Success</th><th>Errors</th><th>Tokens</th><th>Spend</th><th>Baseline</th><th>Savings</th>
           </tr></thead>
           <tbody id="weekly-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="tab-panel" id="tab-tools">
+    <div class="section">
+      <h2>Tool calls</h2>
+      <p class="hint">Tools observed on passthrough turns. Tick <strong>Read-only</strong> to make a tool's turns downroute-eligible. A tool must still be armed separately (<code>tokenclaw downroute arm</code>) before any turn actually routes.</p>
+      <div class="hint" id="tools-status"></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Name</th><th>Calls</th><th>First seen</th><th>Last seen</th><th>Read-only</th>
+          </tr></thead>
+          <tbody id="tools-tbody"></tbody>
         </table>
       </div>
     </div>
@@ -328,6 +345,54 @@ function renderManagedActivation(data){
     </tr>`;
   }
 }
+async function toggleToolReadonly(name,cb){
+  const desired=cb.checked;
+  const statusLine=document.getElementById('tools-status');
+  cb.disabled=true;
+  try{
+    const response=await fetch('/tokenclaw/dashboard/admin/tool-readonly',{
+      method:'POST',
+      headers:{'content-type':'application/json'},
+      body:JSON.stringify({name:name,read_only:desired}),
+    });
+    let data={};
+    try{data=await response.json();}catch(parseError){data={};}
+    if(!response.ok||!data.ok){
+      cb.checked=!desired;
+      const msg=(data.error&&data.error.message)||('write failed ('+response.status+')');
+      if(statusLine)statusLine.textContent=name+': '+msg;
+    }else if(statusLine){
+      statusLine.textContent=name+' → read-only='+desired+' (takes effect within ~5s)';
+    }
+  }catch(error){
+    cb.checked=!desired;
+    if(statusLine)statusLine.textContent='could not reach dashboard write endpoint for '+name;
+  }finally{
+    cb.disabled=false;
+  }
+}
+function renderTools(data){
+  const tbody=document.getElementById('tools-tbody');
+  if(!tbody)return;
+  const tools=data.tools||[];
+  const rows=tools.map(row=>{
+    const eff=!!row.effective_read_only;
+    const label=row.has_override?'override':'default';
+    const cls=row.has_override?'ok':'miss';
+    const title=row.has_override?'operator override':(row.default_read_only?'built-in read-only default':'unknown tool default (not read-only)');
+    return `<tr>
+      <td class="model">${esc(row.name)}</td>
+      <td>${num(row.call_count)}</td>
+      <td class="muted">${localTime(row.first_seen)}</td>
+      <td class="muted">${localTime(row.last_seen)}</td>
+      <td><label><input type="checkbox" class="tool-ro" data-tool-name="${esc(row.name)}" ${eff?'checked':''}> <span class="badge ${cls}" title="${esc(title)}">${label}</span></label></td>
+    </tr>`;
+  }).join('');
+  tbody.innerHTML=rows||'<tr><td colspan="5" class="muted">No tool calls observed yet.</td></tr>';
+  tbody.querySelectorAll('.tool-ro').forEach(cb=>{
+    cb.addEventListener('change',()=>toggleToolReadonly(cb.dataset.toolName,cb));
+  });
+}
 function renderWeekly(data){
   const totals=data.totals||{};
   text('week-units',num(totals.total_units));
@@ -361,12 +426,14 @@ function renderWeekly(data){
 }
 async function refresh(){
   try{
-    const [today,weekly]=await Promise.all([
+    const [today,weekly,tools]=await Promise.all([
       getJson('/tokenclaw/stats'),
       getJson('/tokenclaw/stats/weekly'),
+      getJson('/tokenclaw/stats/tools'),
     ]);
     renderToday(today);
     renderWeekly(weekly);
+    renderTools(tools);
     statusEl.textContent='updated '+new Date().toLocaleTimeString();
   }catch(error){
     statusEl.textContent='error loading dashboard';

@@ -87,7 +87,8 @@ from tokenclaw.routing_experiments import (
 from tokenclaw.router import extract_text, has_tools
 from tokenclaw.downroute import (
     DownrouteConfig, classify_eligibility, decide_downroute,
-    pocket_for, pocket_key, resolve_target_model,
+    effective_read_only_names, pocket_for, pocket_key, resolve_target_model,
+    schedule_tool_sightings,
 )
 from tokenclaw.store import stable_json, utc_now
 from tokenclaw.upstream_url import join_openai_upstream_url, openai_websocket_url
@@ -157,6 +158,7 @@ def _maybe_apply_openai_downroute(
     turn can only step to a cheaper gpt-5.x tier. Read-only classification fails
     closed on custom function tools whose names we cannot vouch for.
     """
+    schedule_tool_sightings(store_obj, raw_body)
     if sampled_shadow_pass_through:
         return
     if str(crunched.get("model") or "") != str(resolved_requested_model):
@@ -166,7 +168,9 @@ def _maybe_apply_openai_downroute(
         return
     req_family, target_family = pocket
     key = pocket_key(req_family, target_family)
-    elig = classify_eligibility(raw_body, category, cfg)
+    elig = classify_eligibility(
+        raw_body, category, cfg, read_only_names=effective_read_only_names(store_obj)
+    )
     if not elig.eligible:
         return
     f = _openai_cached_pocket_f(store_obj, key, cfg.f_default)
