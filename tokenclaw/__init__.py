@@ -1,4 +1,4 @@
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 
 # Public, server-free library API. Importing these pulls only the local crunch/
 # cache/store modules (no fastapi/uvicorn/httpx) — see tokenclaw/library.py.
