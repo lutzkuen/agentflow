@@ -1,6 +1,6 @@
 [project]
 name = "tokenclaw"
-version = "0.3.0"
+version = "0.3.1"
 description = "Token savings for LLM traffic: crunching + local cache as a library, or a local proxy with routing and telemetry."
 readme = "README.md"
 license = { text = "Apache-2.0" }
