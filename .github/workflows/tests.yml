@@ -1,0 +1,54 @@
+name: Unit tests
+
+'on':
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  unit-tests:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+        # tests/test_install_smoke_workflow.py imports tomllib (stdlib 3.11+),
+        # so the unit suite requires Python >= 3.11 even though the package
+        # itself supports 3.10.
+        python-version:
+          - '3.11'
+          - '3.12'
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package and test dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          # Local vanilla surface: server proxy + local crunch compression +
+          # openai realtime. No managed/server-integration extras (psycopg).
+          python -m pip install -e ".[server,compression,openai-realtime]" pytest
+
+      - name: Run unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pytest tests/ -p no:cacheprovider -q

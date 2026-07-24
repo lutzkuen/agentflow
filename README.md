@@ -9,7 +9,7 @@ using explicit, lossless-first rules. Use it either way:
   just this.
 - **As a local proxy** ([Run as a local proxy](#run-as-a-local-proxy)) — point an
   OpenAI- or Anthropic-compatible client at localhost for zero-code-change savings,
-  a read-only dashboard, and opt-in managed routing.
+  a read-only dashboard, and a local read-only-tool-heavy routing dial.
 
 By default, TokenClaw does **not** store raw prompts or responses.
 
@@ -44,16 +44,17 @@ print(f"saved {report.chars_saved} chars via {report.applied_rules}")
 
 Chat Completions works the same way with `messages=`. There is also a
 provider-agnostic `crunch_request(body, provider=...)` (OpenAI or Anthropic) and an
-optional, still-server-free `LocalCache`. Full guide with the crunch→cache pattern:
-**[docs/library.md](docs/library.md)**. The credential/trust boundary is spelled out
-in [docs/client-server-boundary.md](docs/client-server-boundary.md).
+optional, still-server-free `LocalCache`, and `route_openai` / `route_request` for the
+local f\* downroute dial (pass your own read-only tool allow-list). Full guide with the
+crunch→cache pattern: **[docs/library.md](docs/library.md)**.
 
 ## Run as a local proxy
 
 For zero-code-change savings across a whole app or IDE — plus a read-only dashboard
-and opt-in managed routing — install the `server` extra and point your client's base
-URL at localhost. This is the heavier, more trust-demanding path (a proxy that
-forwards your real provider calls); the library above touches nothing on the wire.
+and the local read-only-tool-heavy downroute dial — install the `server` extra and
+point your client's base URL at localhost. This is the heavier, more trust-demanding
+path (a proxy that forwards your real provider calls); the library above touches
+nothing on the wire.
 
 ```bash
 pip install 'tokenclaw[server]'  # proxy + CLI + dashboard
@@ -62,7 +63,6 @@ pip install 'tokenclaw[server]'  # proxy + CLI + dashboard
 Further optional extras stack on top of the `server` install:
 
 ```bash
-pip install 'tokenclaw[managed]'          # Postgres-backed managed/workbench storage
 pip install 'tokenclaw[compression]'      # zstd request-body decoding
 pip install 'tokenclaw[openai-realtime]'  # OpenAI realtime WebSocket proxy bridge
 pip install 'tokenclaw[all]'              # all optional runtime extras (incl. server)
@@ -186,48 +186,47 @@ tokenclaw stats --json
 tokenclaw doctor --json
 ```
 
-## Managed optimizer modes
+## Local routing (f\* downroute)
 
-TokenClaw is local-first. Managed optimizer communication is off unless you opt in, and
-local hard gates always win over a server recommendation. The managed split is
-deliberate: the TokenClaw client proxies provider traffic, captures local
-metadata, executes supported local actions, and reports outcomes; the managed
-server decides what to measure, which policy decision to recommend, and how to
-size canaries or holdouts.
+TokenClaw's one routing carve-out is a **calibrated local dial**: on a read-only,
+tool-heavy turn it will probabilistically swap the request to the next cheaper
+same-provider tier. It is a thermostat, not a learned model — one inspectable number
+`f` per pocket (the fraction of eligible turns to downroute), moved only by local
+evidence the proxy can verify itself. Everything about it stays on your machine; tool
+names are never forwarded anywhere.
+
+A downroute fires only when **nothing else moved the model** (no manual hard rule) and
+the turn is genuinely read-only tool-heavy — the most recent assistant tool calls are
+all on the read-only allow-list. Mutating or unknown tools fail closed and stay on the
+requested model.
+
+The ladder ("pockets") is per provider:
 
 ```text
-TOKENCLAW_MANAGED=0
-TOKENCLAW_MANAGED_MODE=observe_only|dry_run|canary|live
-TOKENCLAW_MANAGED_ROUTING=0
-TOKENCLAW_MANAGED_CRUNCH=0
-TOKENCLAW_MANAGED_CACHE=0
-TOKENCLAW_LOCAL_RULES_ONLY=1
+opus->sonnet   sonnet->haiku          # Anthropic
+sol->terra     terra->luna   luna->mini   # OpenAI
 ```
 
-`TOKENCLAW_LOCAL_RULES_ONLY=1` is the strongest opt-out: TokenClaw never calls the
-managed server and only applies local rules. `observe_only` may fetch feature-only
-server decisions for review, but does not apply them. `dry_run` validates and reports
-what would happen without mutating provider requests. `canary` and `live` allow local
-application only for action families still enabled by the local routing/crunch/cache
-gates. Expired, invalid, unsafe, unsupported, or locally disabled managed actions are
-vetoed and reported as metadata-only outcome feedback.
+Shipped vanilla, all five pockets are **armed at `f=0.05`** with the auto-tune
+controller **on**, so a fresh install downroutes ~5% of read-only tool-heavy turns and
+adjusts each `f` up or down from local harm evidence. It is fully operator-owned —
+inspect and change any pocket at any time:
 
-After each managed decision the local executor records normalized, metadata-only
-feedback for the managed server: which action families were applied, held out, vetoed
-by a local opt-out, unsupported by the local executor, or skipped via fallback, along
-with the decision/policy/contract ids and (when available) numeric outcome metrics
-(status code, latency, retry/fallback counts, token usage, estimated cost and
-baseline). Feedback never includes raw prompts, raw responses, provider bodies, file
-paths, cache keys, or secrets, and it is queued locally with bounded retry/backoff so a
-send failure can never block provider forwarding. Queue retry behavior is shared with
-other managed feedback via `TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS` and
-`TOKENCLAW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS`.
+```bash
+tokenclaw downroute status                 # every pocket's f, armed state, harm counts
+tokenclaw downroute set-f opus->sonnet --f 0.1
+tokenclaw downroute disarm terra->luna     # f -> 0, downroutes nothing
+tokenclaw downroute arm sol->terra         # f -> TOKENCLAW_DOWNROUTE_F_START
+```
 
-Managed server requests and responses are metadata-only. The server must not
-receive provider request bodies, provider response bodies, raw prompts, raw
-responses, secrets, local file paths, cache keys, or un-hashed local
-identifiers. See [Client/server responsibility boundary](docs/client-server-boundary.md)
-for the design note follow-up implementation issues should reference.
+Control the dial with `TOKENCLAW_DOWNROUTE_*` env (`TOKENCLAW_DOWNROUTE_CONTROLLER=1`
+enables auto-tune stepping; `TOKENCLAW_DOWNROUTE_F_START` is the arm level, default
+`0.05`; `TOKENCLAW_DOWNROUTE_F_MAX` caps it). Set `TOKENCLAW_DOWNROUTE_CONTROLLER=0` to
+hold every pocket at the operator's `f` without stepping.
+
+Using TokenClaw as a **library** (no proxy, no dashboard)? The same dial is callable
+directly — pass your own read-only tool allow-list in code. See
+[docs/library.md](docs/library.md) and `route_openai` / `route_request`.
 
 ## OpenAI API apps
 
@@ -487,38 +486,17 @@ Run tests:
 python -m unittest discover -s tests
 ```
 
-## Managed control plane boundary
+## Scope
 
-`tokenclaw_server` is the managed control plane and policy brain for
-metadata-only measurement contracts, policy decisions, canaries, holdouts, and
-research rollups. It is not a provider proxy and must not receive or forward
-provider request or response bodies. Local TokenClaw still owns provider
-forwarding, request mutation, cache lookup/storage/replay, local rule files,
-rollback, the read-only dashboard, and safe fallback when the server is
-unavailable.
+TokenClaw is a self-contained local proxy. It owns provider forwarding, request
+crunching, cache lookup/storage/replay, local rule files, the local f\* downroute dial,
+rollback, and the read-only dashboard — all on your machine, useful with no network
+beyond the provider. There is no SaaS, no accounts, and no fleet learning in it:
 
-Future managed request flow:
-
-1. The server provides a measurement contract describing the metadata fields the
-   client should collect.
-2. The client collects only requested derived metadata and hashed grouping
-   identifiers.
-3. The server returns a signed, expiring policy decision for local routing,
-   crunch, or cache actions.
-4. The client verifies the decision, applies local opt-in flags and hard gates,
-   executes only supported local actions, and forwards provider traffic itself.
-5. The client reports metadata-only local outcomes so the server can improve
-   later decisions.
-
-Client non-goals:
-
-- no learned route discovery or adaptive routing policy in the local package
-- no local savings research bench or cross-install optimization learning
-- no managed policy candidate generation in the local package
+- no learned route discovery or adaptive routing policy — routing is backed by a manual
+  hard rule or the calibrated local dial, or the requested model passes through unchanged
+- no cross-install optimization learning or shared research bench
 - no billing, tenant accounts, hosted shared caches, or fleet policy ownership
-
-The longer boundary note is in
-[docs/client-server-boundary.md](docs/client-server-boundary.md).
 
 ## Dashboard
 
@@ -592,12 +570,8 @@ export TOKENCLAW_LOG_BODIES=1
 | `TOKENCLAW_PORT` | `4000` | Proxy port default |
 | `TOKENCLAW_DASHBOARD_HOST` | `0.0.0.0` | Standalone dashboard host |
 | `TOKENCLAW_DASHBOARD_PORT` | `4002` | Standalone dashboard port |
-| `TOKENCLAW_RECOMMENDATIONS_ENABLED` | `0` | Enable metadata-only managed recommendation calls |
-| `TOKENCLAW_RECOMMENDATION_SERVER_URL` | unset | Managed optimizer URL for recommendation and policy-decision calls |
-| `TOKENCLAW_POLICY_DECISIONS_ENABLED` | `0` | Use managed `/v1/policy-decision` responses for local actions |
-| `TOKENCLAW_POLICY_DECISION_MIN_CONFIDENCE` | `0.75` | Minimum managed routing confidence before local apply |
-| `TOKENCLAW_POLICY_DECISION_CANARY_FRACTION` | `0.0` | Fraction of eligible managed routing decisions to apply |
-| `TOKENCLAW_MANAGED_API_KEY` | unset | Bearer token for non-loopback managed servers |
+| `TOKENCLAW_DOWNROUTE_CONTROLLER` | `1` (vanilla) | Enable the local f\* auto-tune controller |
+| `TOKENCLAW_DOWNROUTE_F_START` | `0.05` | Fraction of eligible turns armed pockets downroute |
 | `TOKENCLAW_CA_BUNDLE` | unset | PEM to trust *in addition to* public roots (corporate/proxy CA). `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE` are also honored |
 | `TOKENCLAW_TLS_TRUST_STORE` | unset | Set to `system` to use the OS trust store (needs `pip install truststore`) |
 | `TOKENCLAW_TLS_VERIFY` | `1` | Set to `0` to disable outbound TLS verification (insecure; last resort) |
@@ -620,14 +594,7 @@ export TOKENCLAW_TLS_VERIFY=0
 ```
 
 Export the corporate root CA from your OS keychain/trust store (or ask IT) as a PEM.
-These apply to every outbound HTTPS client (provider and managed-server calls).
-
-For local managed-server development, set `TOKENCLAW_RECOMMENDATION_SERVER_URL=http://127.0.0.1:4100`.
-That URL is treated as loopback-only and does not require `TOKENCLAW_MANAGED_API_KEY`.
-Remote managed servers still require an API key. Managed calls send derived
-feature metadata only; provider request bodies stay local. The legacy singular
-switches `TOKENCLAW_RECOMMENDATION_ENABLED` and `TOKENCLAW_POLICY_DECISION_ENABLED`
-are still accepted for existing installations.
+These apply to every outbound HTTPS client (provider calls).
 
 ## Local cache rules
 
@@ -686,7 +653,7 @@ pattern_rules:
 
 ## Advanced policy and diagnostics
 
-The README keeps the happy path short. Advanced local policy review/apply/rollback, managed recommendation bridge, replayability reports, routing experiments, and promotion diagnostics are available under `tokenclaw internal`. Commands that need optional managed storage, zstd decoding, or OpenAI realtime bridging will print the matching extra install hint instead of making those dependencies part of the first-run install.
+The README keeps the happy path short. Advanced local policy review/apply/rollback, replayability reports, routing experiments, and promotion diagnostics are available under `tokenclaw internal`. Commands that need zstd decoding or OpenAI realtime bridging will print the matching extra install hint instead of making those dependencies part of the first-run install.
 
 List them with:
 

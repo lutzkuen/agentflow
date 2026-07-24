@@ -34,6 +34,7 @@ class StartDevScriptTests(unittest.TestCase):
         self.assertNotIn("pkill", raw)
         self.assertNotIn("kill ", raw)
 
+    @unittest.skipUnless(os.name == "posix", "POSIX exec bit and bash only present on POSIX")
     def test_start_dev_script_is_executable_and_shell_syntax_valid(self):
         mode = SCRIPT.stat().st_mode
 

@@ -938,5 +938,67 @@ class TestOpenAIFirewall(unittest.TestCase):
                 self._run(routing_meta)
 
 
+# --- shipped-vanilla seeding ------------------------------------------------
+
+class TestSeedDefaultPockets(unittest.TestCase):
+    """seed_default_pockets is the shipped-vanilla default: it arms the full
+    same-provider cascade at f_start, but idempotently so operator intent
+    (disarm, controller-stepped f) survives a restart re-seed."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.store = Store(str(Path(self._tmp.name) / "tokenclaw.sqlite3"))
+        self.cfg = DownrouteConfig()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_fresh_seed_arms_full_cascade(self):
+        seeded = downroute.seed_default_pockets(self.store, self.cfg)
+        self.assertEqual(
+            set(seeded),
+            {"opus->sonnet", "sonnet->haiku", "sol->terra", "terra->luna", "luna->mini"},
+        )
+        for key in seeded:
+            self.assertAlmostEqual(self.store.get_downroute_pocket_f(key), self.cfg.f_start)
+            row = self.store._downroute_pocket_row(key)
+            self.assertIsNotNone(row["armed_at"])
+
+    def test_seed_is_idempotent(self):
+        first = downroute.seed_default_pockets(self.store, self.cfg)
+        self.assertEqual(len(first), 5)
+        second = downroute.seed_default_pockets(self.store, self.cfg)
+        self.assertEqual(second, [])
+
+    def test_operator_disarm_survives_reseed(self):
+        downroute.seed_default_pockets(self.store, self.cfg)
+        self.store.set_downroute_pocket_f(
+            pocket="terra->luna", f=0.0, requested_family="terra",
+            target_family="luna", action="disarm",
+        )
+        seeded = downroute.seed_default_pockets(self.store, self.cfg)
+        self.assertEqual(seeded, [])
+        self.assertEqual(self.store.get_downroute_pocket_f("terra->luna"), 0.0)
+
+    def test_controller_stepped_f_survives_reseed(self):
+        downroute.seed_default_pockets(self.store, self.cfg)
+        self.store.set_downroute_pocket_f(
+            pocket="opus->sonnet", f=0.20, requested_family="opus",
+            target_family="sonnet", action="step",
+        )
+        downroute.seed_default_pockets(self.store, self.cfg)
+        self.assertAlmostEqual(self.store.get_downroute_pocket_f("opus->sonnet"), 0.20)
+
+    def test_partial_seed_fills_only_missing_pockets(self):
+        self.store.set_downroute_pocket_f(
+            pocket="opus->sonnet", f=0.11, requested_family="opus",
+            target_family="sonnet", action="arm",
+        )
+        seeded = downroute.seed_default_pockets(self.store, self.cfg)
+        self.assertNotIn("opus->sonnet", seeded)
+        self.assertEqual(len(seeded), 4)
+        self.assertAlmostEqual(self.store.get_downroute_pocket_f("opus->sonnet"), 0.11)
+
+
 if __name__ == "__main__":
     unittest.main()

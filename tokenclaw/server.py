@@ -472,6 +472,15 @@ async def _log_startup_session_spending_summary() -> None:
     _log_recent_session_spending_summary("startup")
     await _finalize_routing_outcome_labels_once()
     await _finalize_downroute_outcomes_once()
+    if env("TOKENCLAW_DOWNROUTE_SEED_DEFAULTS", "1").strip().lower() not in {"0", "false", "no", "off"}:
+        try:
+            from tokenclaw.downroute import DownrouteConfig, seed_default_pockets
+
+            seeded = await asyncio.to_thread(seed_default_pockets, store, DownrouteConfig.from_env())
+            if seeded:
+                print(f"tokenclaw_downroute_seeded pockets={','.join(seeded)}", file=sys.stderr)
+        except Exception as exc:
+            print(f"tokenclaw_downroute_seed_error: {exc}", file=sys.stderr)
     try:
         label_interval = env_int("TOKENCLAW_ROUTING_OUTCOME_LABEL_INTERVAL_SECONDS", 60)
     except ValueError:

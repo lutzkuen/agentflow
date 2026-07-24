@@ -229,15 +229,10 @@ class AgentflowActivationCliTests(unittest.TestCase):
             "tokenclaw doctor",
             "openai_base_url = \"http://127.0.0.1:4003/v1\"",
             "ANTHROPIC_BASE_URL=http://127.0.0.1:4000",
-            "tokenclaw_server",
-            "policy brain",
-            "metadata-only measurement contracts",
-            "docs/client-server-boundary.md",
+            # Server-boundary detail was dropped from the README when server integration
+            # left the product surface; it now lives only in the doc asserted below. Do
+            # not re-add tokenclaw_server / policy brain / managed-policy strings here.
             "no learned route discovery",
-            "no local savings research bench",
-            "no managed policy candidate generation",
-            "provider request or response bodies",
-            "not a provider proxy",
             "GitHub Copilot non-goal",
             "unsupported: GitHub Copilot is not a base-url target",
             "pip install tokenclaw",
@@ -1319,7 +1314,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             env_path = config_dir / "claude-vscode.env"
             self.assertIn("# TokenClaw\n", bashrc.read_text(encoding="utf-8"))
-            self.assertIn(f"source {env_path}\n", bashrc.read_text(encoding="utf-8"))
+            self.assertIn(activation._shell_profile_source_line(env_path) + "\n", bashrc.read_text(encoding="utf-8"))
             config = json.loads((config_dir / "activation.json").read_text(encoding="utf-8"))
             self.assertEqual(config["targets"]["claude-vscode"]["shell_profile_path"], str(bashrc))
             output = stdout.getvalue()
@@ -1342,7 +1337,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             env_path = config_dir / "claude-vscode.env"
-            self.assertIn(f"source {env_path}\n", bashrc.read_text(encoding="utf-8"))
+            self.assertIn(activation._shell_profile_source_line(env_path) + "\n", bashrc.read_text(encoding="utf-8"))
             self.assertNotIn(str(env_path), zshrc.read_text(encoding="utf-8"))
             config = json.loads((config_dir / "activation.json").read_text(encoding="utf-8"))
             self.assertEqual(config["targets"]["claude-vscode"]["shell_profile_path"], str(bashrc))
@@ -1363,7 +1358,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             env_path = config_dir / "claude-vscode.env"
-            self.assertIn(f"source {env_path}\n", zshrc.read_text(encoding="utf-8"))
+            self.assertIn(activation._shell_profile_source_line(env_path) + "\n", zshrc.read_text(encoding="utf-8"))
             self.assertNotIn(str(env_path), bashrc.read_text(encoding="utf-8"))
 
     def test_activate_claude_vscode_falls_back_to_profile_for_unknown_shell(self):
@@ -1378,7 +1373,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             profile = home / ".profile"
             env_path = config_dir / "claude-vscode.env"
-            self.assertIn(f"source {env_path}\n", profile.read_text(encoding="utf-8"))
+            self.assertIn(activation._shell_profile_source_line(env_path) + "\n", profile.read_text(encoding="utf-8"))
             config = json.loads((config_dir / "activation.json").read_text(encoding="utf-8"))
             self.assertEqual(config["targets"]["claude-vscode"]["shell_profile_path"], str(profile))
 
@@ -1389,7 +1384,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             home.mkdir()
             profile = home / ".zshrc"
             env_path = config_dir / "claude-vscode.env"
-            profile.write_text(f"source {env_path}\n", encoding="utf-8")
+            profile.write_text(activation._shell_profile_source_line(env_path) + "\n", encoding="utf-8")
 
             with patch.dict(os.environ, {"HOME": str(home), "SHELL": "/bin/zsh"}, clear=True):
                 first = cli.tokenclaw_cli(["activate", "claude-vscode", "--config-dir", str(config_dir)], stdout=io.StringIO())
@@ -1398,7 +1393,12 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
             self.assertEqual(first, 0)
             self.assertEqual(second, 0)
-            self.assertEqual(profile.read_text(encoding="utf-8").count(str(env_path)), 1)
+            self.assertEqual(
+                profile.read_text(encoding="utf-8").count(
+                    activation._shell_profile_source_line(env_path)
+                ),
+                1,
+            )
             self.assertIn("Shell profile changed: false", second_stdout.getvalue())
 
     def test_activate_claude_vscode_is_idempotent(self):

@@ -4,7 +4,7 @@ This module is the supported way to use TokenClaw's local capabilities directly
 inside another Python application — for example a self-built OpenAI or Anthropic
 app — without running the proxy server.
 
-It exposes two things:
+It exposes three things:
 
 - **Crunching** (stateless): :func:`crunch_request` / :func:`crunch_openai` shrink a
   request payload with the same manual, lossless-first rules the proxy applies
@@ -13,9 +13,14 @@ It exposes two things:
 - **Local exact-match cache** (stateful, SQLite): :class:`LocalCache` stores and
   replays provider responses keyed by the (post-crunch) request, endpoint, and
   provider — the same key discipline the proxy uses.
-
-Routing is intentionally NOT exposed here: it is "backed or off" (it needs the
-managed server or manual hard rules) and cannot be honored by a stateless call.
+- **f\\* routing** (stateless): :func:`route_request` / :func:`route_openai` apply the
+  calibrated local downroute dial to a request — probabilistically swap a
+  read-only tool-heavy turn to the next cheaper same-provider tier. This is the
+  proxy's one routing carve-out ("local applies, server learns"), and it is a
+  *backing*, not an unbacked guess: it only fires on genuine read-only tool
+  trajectories the caller has vouched for. Because the library has no dashboard,
+  the caller passes the read-only tool allow-list in directly; tool names stay
+  in-process and are never forwarded anywhere.
 
 Everything here imports cleanly without the proxy's web stack — see the ``[server]``
 extra in ``pyproject.toml``. The only hard runtime dependency is PyYAML.
@@ -43,12 +48,22 @@ from __future__ import annotations
 
 import copy
 import json
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from tokenclaw.cache import cache_key_for
 from tokenclaw.crunch import crunch_body, estimate_tokens_from_text
+from tokenclaw.downroute import (
+    OPENAI_DOWNROUTE_TIER_MAP,
+    DownrouteConfig,
+    classify_eligibility,
+    decide_downroute,
+    pocket_for,
+    pocket_key,
+    resolve_target_model,
+)
 from tokenclaw.paths import safe_expanduser
 from tokenclaw.store import SQLiteStore, stable_json
 
@@ -57,6 +72,9 @@ __all__ = [
     "crunch_request",
     "crunch_openai",
     "LocalCache",
+    "RouteResult",
+    "route_request",
+    "route_openai",
 ]
 
 _OPENAI_CHAT_ENDPOINT = "/v1/chat/completions"
@@ -204,6 +222,137 @@ def crunch_openai(
         kwargs["model"] = result.body.get("model", model)
     kwargs[payload_key] = result.body.get(payload_key)
     return kwargs, result
+
+
+@dataclass
+class RouteResult:
+    """Outcome of applying the f* downroute dial to a single request.
+
+    ``routed_model`` is the model to send: the next cheaper same-provider tier
+    when ``downrouted`` is true, otherwise the ``requested_model`` unchanged.
+    ``eligible`` says the turn is a genuine read-only tool-heavy trajectory (so it
+    *could* have downrouted); ``downrouted`` says the per-call coin flip also fired.
+    ``reason`` is the eligibility verdict (e.g. ``"read-only-tool-heavy"``,
+    ``"no-recent-tool-use"``, ``"mutating-or-unknown:<names>"``), ``pocket`` the
+    ladder rung (e.g. ``"terra->luna"``), and ``tool_names`` the turn's observed
+    read-only tools. Routing never changes token counts — it only swaps the model.
+    """
+
+    requested_model: str | None
+    routed_model: str | None
+    downrouted: bool
+    eligible: bool
+    reason: str
+    f: float
+    pocket: str | None = None
+    tool_names: tuple[str, ...] = ()
+
+
+def _default_downroute_tier_map() -> dict[str, str]:
+    # router resolves Anthropic tiers from env (TOKENCLAW_*_MODEL) at its import;
+    # lazy-imported so the base library import stays minimal and web-stack-free.
+    # OpenAI tiers come from downroute's canonical map. Cross-provider merge is
+    # safe: pocket_for keeps every pocket within one provider's ladder.
+    from tokenclaw import router
+
+    return {
+        "haiku": router.HAIKU_DEFAULT,
+        "sonnet": router.SONNET_DEFAULT,
+        "opus": router.OPUS_DEFAULT,
+        **OPENAI_DOWNROUTE_TIER_MAP,
+    }
+
+
+def route_request(
+    body: dict[str, Any],
+    *,
+    read_only_tools: Iterable[str],
+    f: float = 0.05,
+    session_id: str | None = None,
+    call_id: str | None = None,
+    tier_map: dict[str, str] | None = None,
+) -> RouteResult:
+    """Apply the calibrated local f* downroute dial to a request, in-process.
+
+    This is the proxy's downroute carve-out made callable without a proxy, server,
+    or dashboard. ``read_only_tools`` is the caller-supplied allow-list of tool
+    names that count as read-only (mechanical) — since there is no dashboard to
+    tick, the caller vouches for them here. A turn is *eligible* only when its most
+    recent assistant tool activity is non-empty and **every** tool used is in that
+    list; unknown or mutating tools fail closed (kept on the requested model).
+    Eligible turns downroute to the next cheaper same-provider tier with
+    probability ``f`` — a deterministic per-``call_id`` coin flip, so a retried
+    request with the same ``call_id`` is not re-diced onto a different model. Omit
+    ``call_id`` and each call is diced independently.
+
+    The input ``body`` is not mutated; read the model to send from
+    ``result.routed_model``. Tool names stay in-process and are never forwarded.
+    ``tier_map`` (tier -> concrete model) defaults to the proxy's env-driven
+    Anthropic tiers plus the canonical OpenAI ladder.
+    """
+    requested = body.get("model") if isinstance(body, dict) else None
+    pocket = pocket_for(requested)
+    if pocket is None:
+        return RouteResult(requested, requested, False, False, "no-pocket", 0.0)
+    requested_family, target_family = pocket
+    key = pocket_key(requested_family, target_family)
+    allow = frozenset(str(n).lower() for n in read_only_tools)
+    verdict = classify_eligibility(body, "tool-heavy", DownrouteConfig(), read_only_names=allow)
+    if not verdict.eligible:
+        return RouteResult(requested, requested, False, False, verdict.reason, 0.0, key, verdict.tool_names)
+    try:
+        frac = float(f)
+    except (TypeError, ValueError):
+        frac = 0.0
+    if frac <= 0.0:
+        return RouteResult(requested, requested, False, True, "pocket-unarmed", 0.0, key, verdict.tool_names)
+    decided_call_id = call_id if call_id is not None else uuid.uuid4().hex
+    if not decide_downroute(session_id=session_id, call_id=decided_call_id, f=frac):
+        return RouteResult(requested, requested, False, True, "coin-flip-kept", frac, key, verdict.tool_names)
+    target_model = resolve_target_model(target_family, tier_map or _default_downroute_tier_map())
+    if not target_model:
+        return RouteResult(requested, requested, False, True, "no-target-model", frac, key, verdict.tool_names)
+    return RouteResult(requested, target_model, True, True, verdict.reason, frac, key, verdict.tool_names)
+
+
+def route_openai(
+    *,
+    model: str,
+    messages: list[Any] | None = None,
+    input: Any | None = None,
+    read_only_tools: Iterable[str],
+    f: float = 0.05,
+    session_id: str | None = None,
+    call_id: str | None = None,
+    tier_map: dict[str, str] | None = None,
+) -> RouteResult:
+    """f* routing for an OpenAI request, mirroring :func:`crunch_openai`'s shape.
+
+    Provide exactly one of ``messages=`` (Chat Completions) or ``input=``
+    (Responses) — the assistant tool-call history the eligibility gate reads lives
+    there. Returns a :class:`RouteResult`; send with ``result.routed_model``::
+
+        kwargs, _ = crunch_openai(model="gpt-5.6-terra", messages=messages)
+        route = route_openai(model=kwargs["model"], messages=kwargs["messages"],
+                             read_only_tools=["get_file", "search_docs"])
+        kwargs["model"] = route.routed_model
+        client.chat.completions.create(**kwargs)
+    """
+    if (messages is None) == (input is None):
+        raise ValueError("provide exactly one of messages= (chat) or input= (responses)")
+    body: dict[str, Any] = {"model": model}
+    if messages is not None:
+        body["messages"] = messages
+    else:
+        body["input"] = input
+    return route_request(
+        body,
+        read_only_tools=read_only_tools,
+        f=f,
+        session_id=session_id,
+        call_id=call_id,
+        tier_map=tier_map,
+    )
 
 
 class LocalCache:

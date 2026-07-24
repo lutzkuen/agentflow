@@ -314,6 +314,18 @@ POCKET_TARGET_FAMILY = {
     "luna": "mini",
 }
 
+# Canonical OpenAI ladder tier -> concrete serving model. Lives here (the pockets
+# home) so the OpenAI proxy seam and the server-free library router share one
+# definition; the library must resolve OpenAI targets without importing the web
+# stack. Anthropic tiers come from router._TIER_MAP instead (env-driven), so this
+# map is OpenAI-only, matching the out-of-scope cross-provider boundary.
+OPENAI_DOWNROUTE_TIER_MAP = {
+    "sol": "gpt-5.6-sol",
+    "terra": "gpt-5.6-terra",
+    "luna": "gpt-5.6-luna",
+    "mini": "gpt-5-mini",
+}
+
 
 def pocket_for(requested_model: str | None) -> Optional[tuple[str, str]]:
     """(requested_family, target_family) for a downroute-eligible model, else None."""
@@ -613,3 +625,41 @@ class DownrouteConfig:
                 "TOKENCLAW_DOWNROUTE_CATEGORIES", frozenset({"tool-heavy"})
             ),
         )
+
+
+def seed_default_pockets(store: Any, cfg: "DownrouteConfig") -> list[str]:
+    """Arm the full same-provider cascade at ``cfg.f_start`` — but only for pockets
+    with no existing row.
+
+    This is the shipped-vanilla default: a fresh install serves the Anthropic and
+    OpenAI ladders already armed on read-only tool-heavy turns, so a user who just
+    runs the server gets calibrated downrouting without any dashboard clicks. The
+    idempotent skip is what keeps this compatible with "defaults off; operator-armed;
+    operator-overridable": a pocket the operator has since disarmed (row present,
+    f=0) or that the controller has stepped is left untouched, so seeding never
+    overrides operator intent and survives restarts. Only the server binary calls
+    this; the library import path never seeds, so `import tokenclaw` stays
+    defaults-off.
+    """
+    try:
+        existing = {str(r.get("pocket")) for r in store.list_downroute_pockets()}
+    except Exception:
+        return []
+    seeded: list[str] = []
+    for requested_family, target_family in POCKET_TARGET_FAMILY.items():
+        key = pocket_key(requested_family, target_family)
+        if key in existing:
+            continue
+        try:
+            store.set_downroute_pocket_f(
+                pocket=key,
+                f=cfg.f_start,
+                requested_family=requested_family,
+                target_family=target_family,
+                action="arm",
+                reset_window=True,
+            )
+        except Exception:
+            continue
+        seeded.append(key)
+    return seeded

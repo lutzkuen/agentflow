@@ -87,6 +87,11 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 def _managed_policy_decisions_configured() -> bool:
+    # The single opt-in gate for all server/managed-policy integration. Shipped
+    # vanilla ships this dormant: it stays False unless the operator turns on BOTH
+    # recommendations and policy-decisions AND points at a server URL. None of the
+    # managed_* subsystem consults the server until all three are set, so the local
+    # proxy (crunch/cache/downroute/dashboard) is fully useful with the server off.
     recommendations_enabled = (
         _env_bool("TOKENCLAW_RECOMMENDATIONS_ENABLED", False)
         if "TOKENCLAW_RECOMMENDATIONS_ENABLED" in os.environ

@@ -86,7 +86,7 @@ from tokenclaw.routing_experiments import (
 )
 from tokenclaw.router import extract_text, has_tools
 from tokenclaw.downroute import (
-    DownrouteConfig, classify_eligibility, decide_downroute,
+    DownrouteConfig, OPENAI_DOWNROUTE_TIER_MAP, classify_eligibility, decide_downroute,
     effective_read_only_names, pocket_for, pocket_key, resolve_target_model,
     schedule_tool_sightings,
 )
@@ -106,14 +106,9 @@ _DOWNROUTE_CONFIG = DownrouteConfig.from_env()
 # Ladder tier -> concrete OpenAI model, the same rungs
 # routing_experiments._suggest_adjacent_routed_model walks. downroute._downroute_family
 # returns the tier (sol/terra/luna/mini) as the pocket family, so target_family here
-# is a tier name and resolves to its serving model. Cross-provider routing is out of
-# scope, so this map is OpenAI-only.
-_OPENAI_DOWNROUTE_TIER_MAP = {
-    "sol": "gpt-5.6-sol",
-    "terra": "gpt-5.6-terra",
-    "luna": "gpt-5.6-luna",
-    "mini": "gpt-5-mini",
-}
+# is a tier name and resolves to its serving model. Canonical definition lives in
+# downroute so the server-free library router shares it.
+_OPENAI_DOWNROUTE_TIER_MAP = OPENAI_DOWNROUTE_TIER_MAP
 # pocket_key -> (f, expires_monotonic); a few-second TTL keeps the shipped-but-
 # unarmed hot path free of per-request SQLite reads once f=0 is cached, while
 # operator arming still takes effect within the TTL.
