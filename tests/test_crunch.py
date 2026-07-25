@@ -479,7 +479,9 @@ class CrunchRulesTest(unittest.TestCase):
             self.assertFalse(meta["enabled"])
             self.assertFalse(meta["changed"])
             self.assertEqual(meta["policy_source"], "local-manual")
-            self.assertEqual(meta["rule_path"], str(config / "crunch_rules.yaml"))
+            # rule_path is built from Path.cwd(), which getcwd() canonicalizes;
+            # resolve the expected path too so macOS /var -> /private/var matches.
+            self.assertEqual(meta["rule_path"], str((config / "crunch_rules.yaml").resolve()))
 
     def test_config_crunch_rules_can_change_shortening_threshold_without_env_flags(self):
         with TemporaryDirectory() as tmp:

@@ -319,7 +319,9 @@ semantic_cache:
             self.assertEqual(meta["status"], "miss")
             self.assertEqual(meta["reason"], "semantic-miss")
             self.assertEqual(meta["policy_source"], "local-manual")
-            self.assertEqual(meta["rule_path"], str(config / "cache_rules.yaml"))
+            # rule_path is built from Path.cwd(), which getcwd() canonicalizes;
+            # resolve the expected path too so macOS /var -> /private/var matches.
+            self.assertEqual(meta["rule_path"], str((config / "cache_rules.yaml").resolve()))
             self.assertEqual(meta["semantic_threshold"], 0.82)
 
     def test_config_cache_rules_can_enable_exact_tool_cache_without_env_flags(self):
